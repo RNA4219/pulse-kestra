@@ -16,6 +16,27 @@ errors:
     description: "Flow failed"
 
 tasks:
+  # 0. Update taskstate to in_progress and create run with running status
+  - id: start-taskstate-run
+    type: io.kestra.plugin.scripts.shell.Commands
+    description: "Set task to in_progress and create run with running status"
+    commands:
+      - |
+        python {{ globals.taskstate_cli_path | default('C:/Users/ryo-n/Codex_dev/agent-taskstate/docs/src/agent-taskstate_cli.py') }} \
+          --db "{{ globals.taskstate_db | default('C:/Users/ryo-n/.agent-taskstate/agent-taskstate.db') }}" \
+          task set-status \
+          --task {{ trigger.body.task_id }} \
+          --to in_progress \
+          --reason "Kestra flow started processing"
+
+        # Create run with running status
+        python {{ globals.taskstate_cli_path | default('C:/Users/ryo-n/Codex_dev/agent-taskstate/docs/src/agent-taskstate_cli.py') }} \
+          --db "{{ globals.taskstate_db | default('C:/Users/ryo-n/.agent-taskstate/agent-taskstate.db') }}" \
+          run start \
+          --task {{ trigger.body.task_id }} \
+          --agent kestra-worker \
+          --status running
+
   # 1. Log incoming request
   - id: log-request
     type: io.kestra.plugin.core.log.Log
@@ -122,11 +143,21 @@ tasks:
           -i {{ outputDir }}/worker_request.json \
           -o {{ outputDir }}/worker_response.json
 
-  # 4. Extract reply text from response
+  # 5. Extract reply text from response and emit as output
   - id: extract-reply
     type: io.kestra.plugin.scripts.python.Script
+    outputFiles:
+      - reply_text.txt
+      - worker_status.json
     script: |
       import json
+      import sys
+
+      # Install kestra package for output variables
+      import subprocess
+      subprocess.check_call([sys.executable, "-m", "pip", "install", "kestra", "-q"])
+
+      from kestra import Kestra
 
       with open("{{ outputDir }}/worker_response.json", "r") as f:
           response = json.load(f)
@@ -159,16 +190,21 @@ tasks:
               lines.append("\n詳細なロードマップは別途ご確認ください。")
               reply_text = "\n".join(lines)
 
-      with open("{{ outputDir }}/reply_text.txt", "w") as f:
+      # Write reply text to file for post-reply task
+      with open("{{ outputDir }}/reply_text.txt", "w", encoding="utf-8") as f:
           f.write(reply_text)
 
-      # Also save response for taskstate update
+      # Save worker status for taskstate update
+      worker_status = {
+          "status": "done" if run_status == "completed" else "failed",
+          "has_phases": len(phases) > 0,
+          "phase_count": len(phases),
+      }
       with open("{{ outputDir }}/worker_status.json", "w") as f:
-          json.dump({
-              "status": "done" if run_status == "completed" else "failed",
-              "has_phases": len(phases) > 0,
-              "phase_count": len(phases),
-          }, f)
+          json.dump(worker_status, f)
+
+      # Emit reply_text as Kestra output variable for post-reply task
+      Kestra.outputs({"reply_text": reply_text})
 
   # 5. Post reply to Misskey
   - id: post-reply
@@ -185,32 +221,49 @@ tasks:
         "visibility": "home"
       }
 
-  # 6. Update taskstate status based on worker result
+  # 7. Update taskstate: run status and task status based on worker result
   # Phase 1 state mapping:
-  # - done = done + run.succeeded
-  # - failed = review + run.failed
+  # - done = run.succeeded + task.done
+  # - failed = run.failed + task.review
   - id: update-taskstate
     type: io.kestra.plugin.scripts.shell.Commands
-    description: "Update taskstate with final status based on worker result"
+    description: "Update run status and task status based on worker result"
     commands:
       - |
         WORKER_STATUS=$(cat {{ outputDir }}/worker_status.json)
         STATUS=$(echo "$WORKER_STATUS" | python -c "import sys,json; print(json.load(sys.stdin).get('status', 'failed'))")
 
-        if [ "$STATUS" = "done" ]; then
-          TARGET_STATUS="done"
-          REASON="Worker completed successfully"
-        else
-          TARGET_STATUS="review"
-          REASON="Worker failed - requires review"
-        fi
+        CLI_PATH="{{ globals.taskstate_cli_path | default('C:/Users/ryo-n/Codex_dev/agent-taskstate/docs/src/agent-taskstate_cli.py') }}"
+        DB_PATH="{{ globals.taskstate_db | default('C:/Users/ryo-n/.agent-taskstate/agent-taskstate.db') }}"
+        TASK_ID="{{ trigger.body.task_id }}"
 
-        python {{ globals.taskstate_cli_path | default('C:/Users/ryo-n/Codex_dev/agent-taskstate/docs/src/agent-taskstate_cli.py') }} \
-          --db "{{ globals.taskstate_db | default('C:/Users/ryo-n/.agent-taskstate/agent-taskstate.db') }}" \
-          task set-status \
-          --task {{ trigger.body.task_id }} \
-          --to "$TARGET_STATUS" \
-          --reason "$REASON"
+        if [ "$STATUS" = "done" ]; then
+          # Update run to succeeded
+          python "$CLI_PATH" --db "$DB_PATH" run update \
+            --task "$TASK_ID" \
+            --agent kestra-worker \
+            --status succeeded \
+            --reason "Worker completed successfully"
+
+          # Update task to done
+          python "$CLI_PATH" --db "$DB_PATH" task set-status \
+            --task "$TASK_ID" \
+            --to done \
+            --reason "Worker completed successfully"
+        else
+          # Update run to failed
+          python "$CLI_PATH" --db "$DB_PATH" run update \
+            --task "$TASK_ID" \
+            --agent kestra-worker \
+            --status failed \
+            --reason "Worker failed - requires review"
+
+          # Update task to review
+          python "$CLI_PATH" --db "$DB_PATH" task set-status \
+            --task "$TASK_ID" \
+            --to review \
+            --reason "Worker failed - requires review"
+        fi
 
 triggers:
   - id: webhook-trigger

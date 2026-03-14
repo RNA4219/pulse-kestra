@@ -276,3 +276,60 @@ class TestTaskstateUpdateInFlow:
             "Flow should use conditional status based on worker result"
         assert "review" in flow_content.lower(), \
             "Flow should include 'review' status for worker failure"
+
+    def test_flow_sets_in_progress_at_start(self, flow_content):
+        """Test that flow sets task to in_progress at start.
+
+        The flow should update taskstate to in_progress when processing begins.
+        """
+        assert "in_progress" in flow_content, \
+            "Flow should set task to 'in_progress' at start"
+        assert "start-taskstate-run" in flow_content or "set-status" in flow_content, \
+            "Flow should have a task to update status at start"
+
+    def test_flow_creates_run_with_running_status(self, flow_content):
+        """Test that flow creates run with running status at start.
+
+        The flow should create a run record with 'running' status.
+        """
+        assert "running" in flow_content, \
+            "Flow should create run with 'running' status"
+        assert "run start" in flow_content or "run update" in flow_content, \
+            "Flow should use run start/update commands"
+
+    def test_flow_updates_run_succeeded_on_success(self, flow_content):
+        """Test that flow updates run to succeeded on worker success.
+
+        Phase 1 contract: done = run.succeeded + task.done
+        """
+        assert "succeeded" in flow_content, \
+            "Flow should update run to 'succeeded' on success"
+
+    def test_flow_updates_run_failed_on_failure(self, flow_content):
+        """Test that flow updates run to failed on worker failure.
+
+        Phase 1 contract: failed = run.failed + task.review
+        """
+        assert "failed" in flow_content, \
+            "Flow should update run to 'failed' on failure"
+
+    def test_flow_has_run_commands(self, flow_content):
+        """Test that flow uses run start/update commands."""
+        # Check for run CLI commands
+        has_run_start = "run start" in flow_content
+        has_run_update = "run update" in flow_content
+        assert has_run_start or has_run_update, \
+            "Flow should use 'run start' or 'run update' CLI commands"
+
+    def test_flow_uses_kestra_outputs_for_reply_text(self, flow_content):
+        """Test that flow uses Kestra.outputs for reply_text variable.
+
+        The extract-reply task should emit reply_text via Kestra.outputs()
+        so that post-reply can access it via outputs.extract-reply.vars.reply_text.
+        """
+        assert "Kestra.outputs" in flow_content, \
+            "Flow should use Kestra.outputs() to emit reply_text"
+        assert "reply_text" in flow_content, \
+            "Flow should emit reply_text as output"
+        assert "outputs.extract-reply.vars.reply_text" in flow_content, \
+            "post-reply task should access reply_text via outputs.extract-reply.vars.reply_text"

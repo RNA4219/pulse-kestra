@@ -97,8 +97,43 @@ async def handle_misskey_webhook(
                 "patterns": guard_result.matched_patterns,
             },
         )
-        # For Phase 1, we reject but don't create task
-        # Could create task with needs_review status in future
+        # Create taskstate record for guard rejection
+        # This ensures we have a record of rejected inputs
+        gateway = TaskstateGateway(settings)
+        envelope = EventEnvelope.from_misskey_mention(
+            note_id=result.note_id or "",
+            note_text=result.note_text or "",
+            username=result.username,
+            user_id=result.user_id,
+            command=result.command or "",
+            roadmap_request=None,
+        )
+
+        task_result = gateway.create_task_for_mention(
+            trace_id=envelope.trace_id,
+            note_id=result.note_id or "",
+            username=result.username,
+            command=result.command or "guard_rejected",
+        )
+
+        if task_result.success and task_result.data:
+            task_id = task_result.data.get("id")
+            if task_id:
+                # Set status to review for human inspection
+                gateway.set_status(
+                    task_id=task_id,
+                    status="review",
+                    reason=f"Guard rejected: {guard_result.reason}",
+                )
+                logger.info(
+                    "Guard rejection recorded in taskstate",
+                    extra={
+                        "task_id": task_id,
+                        "trace_id": envelope.trace_id,
+                        "reason": guard_result.reason,
+                    },
+                )
+
         raise HTTPException(status_code=400, detail=guard_result.reason)
 
     if guard_result.needs_review:
