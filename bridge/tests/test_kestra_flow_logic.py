@@ -314,12 +314,37 @@ class TestTaskstateUpdateInFlow:
             "Flow should update run to 'failed' on failure"
 
     def test_flow_has_run_commands(self, flow_content):
-        """Test that flow uses run start/update commands."""
-        # Check for run CLI commands
+        """Test that flow uses run start/finish CLI commands."""
+        # Check for correct run CLI commands
         has_run_start = "run start" in flow_content
-        has_run_update = "run update" in flow_content
-        assert has_run_start or has_run_update, \
-            "Flow should use 'run start' or 'run update' CLI commands"
+        has_run_finish = "run finish" in flow_content
+        assert has_run_start, \
+            "Flow should use 'run start' CLI command"
+        assert has_run_finish, \
+            "Flow should use 'run finish' CLI command"
+
+    def test_flow_run_start_has_required_args(self, flow_content):
+        """Test that run start has required CLI arguments.
+
+        Required: --task, --run-type, --actor-type
+        """
+        assert "--run-type" in flow_content, \
+            "run start must have --run-type argument"
+        assert "--actor-type" in flow_content, \
+            "run start must have --actor-type argument"
+        assert "execute" in flow_content or "plan" in flow_content, \
+            "run-type should be a valid type like 'execute'"
+
+    def test_flow_run_finish_has_required_args(self, flow_content):
+        """Test that run finish has required CLI arguments.
+
+        Required: --run, --status
+        """
+        assert "--run" in flow_content, \
+            "run finish must have --run argument to specify run_id"
+        # Check that run_id is captured from run start output
+        assert "run_id" in flow_content, \
+            "Flow should capture and store run_id from run start output"
 
     def test_flow_uses_kestra_outputs_for_reply_text(self, flow_content):
         """Test that flow uses Kestra.outputs for reply_text variable.

@@ -474,7 +474,7 @@ class TestInputGuardIntegration:
     """Tests for input guard integration in webhook handler."""
 
     def test_guard_rejects_malicious_input(self, client):
-        """Test that guard rejects malicious input AND creates taskstate record."""
+        """Test that guard rejects malicious input AND creates taskstate record with valid transitions."""
         with patch("bridge.services.taskstate_gateway.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
                 returncode=0,
@@ -499,17 +499,30 @@ class TestInputGuardIntegration:
         assert response.status_code == 400
         assert "malicious" in response.json()["detail"].lower()
 
-        # Verify taskstate was called to record the rejection
-        assert mock_run.call_count >= 1
+        # Verify taskstate was called to record the rejection with valid transitions
+        # Expected calls: task create, set-status ready, set-status in_progress, set-status review
+        assert mock_run.call_count >= 4, \
+            "Should have 4+ calls: create, ready, in_progress, review"
+
         # First call should be task create
         first_call_args = mock_run.call_args_list[0][0][0]
         assert "task" in first_call_args
         assert "create" in first_call_args
-        # Should have a call to set status to review
-        if mock_run.call_count >= 2:
-            set_status_call = mock_run.call_args_list[1][0][0]
-            assert "set-status" in set_status_call
-            assert "review" in set_status_call
+
+        # Second call should be set-status to ready
+        second_call_args = mock_run.call_args_list[1][0][0]
+        assert "set-status" in second_call_args
+        assert "ready" in second_call_args
+
+        # Third call should be set-status to in_progress
+        third_call_args = mock_run.call_args_list[2][0][0]
+        assert "set-status" in third_call_args
+        assert "in_progress" in third_call_args
+
+        # Fourth call should be set-status to review
+        fourth_call_args = mock_run.call_args_list[3][0][0]
+        assert "set-status" in fourth_call_args
+        assert "review" in fourth_call_args
 
     def test_guard_allows_normal_input(self, client):
         """Test that guard allows normal roadmap input."""

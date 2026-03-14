@@ -16,26 +16,32 @@ errors:
     description: "Flow failed"
 
 tasks:
-  # 0. Update taskstate to in_progress and create run with running status
+  # 0. Update taskstate: in_progress, then create run with running status
   - id: start-taskstate-run
     type: io.kestra.plugin.scripts.shell.Commands
     description: "Set task to in_progress and create run with running status"
     commands:
       - |
-        python {{ globals.taskstate_cli_path | default('C:/Users/ryo-n/Codex_dev/agent-taskstate/docs/src/agent-taskstate_cli.py') }} \
-          --db "{{ globals.taskstate_db | default('C:/Users/ryo-n/.agent-taskstate/agent-taskstate.db') }}" \
-          task set-status \
-          --task {{ trigger.body.task_id }} \
+        CLI_PATH="{{ globals.taskstate_cli_path | default('C:/Users/ryo-n/Codex_dev/agent-taskstate/docs/src/agent-taskstate_cli.py') }}"
+        DB_PATH="{{ globals.taskstate_db | default('C:/Users/ryo-n/.agent-taskstate/agent-taskstate.db') }}"
+        TASK_ID="{{ trigger.body.task_id }}"
+
+        # Transition task: ready -> in_progress
+        python "$CLI_PATH" --db "$DB_PATH" task set-status \
+          --task "$TASK_ID" \
           --to in_progress \
           --reason "Kestra flow started processing"
 
         # Create run with running status
-        python {{ globals.taskstate_cli_path | default('C:/Users/ryo-n/Codex_dev/agent-taskstate/docs/src/agent-taskstate_cli.py') }} \
-          --db "{{ globals.taskstate_db | default('C:/Users/ryo-n/.agent-taskstate/agent-taskstate.db') }}" \
-          run start \
-          --task {{ trigger.body.task_id }} \
-          --agent kestra-worker \
-          --status running
+        # run_type: execute (we're executing the roadmap skill)
+        # actor_type: agent (Kestra worker is an agent)
+        RUN_OUTPUT=$(python "$CLI_PATH" --db "$DB_PATH" run start \
+          --task "$TASK_ID" \
+          --run-type execute \
+          --actor-type agent)
+
+        # Extract run_id from JSON output and save for later use
+        echo "$RUN_OUTPUT" | python -c "import sys,json; data=json.load(sys.stdin); print(data['data']['id'])" > {{ outputDir }}/run_id.txt
 
   # 1. Log incoming request
   - id: log-request
@@ -236,14 +242,13 @@ tasks:
         CLI_PATH="{{ globals.taskstate_cli_path | default('C:/Users/ryo-n/Codex_dev/agent-taskstate/docs/src/agent-taskstate_cli.py') }}"
         DB_PATH="{{ globals.taskstate_db | default('C:/Users/ryo-n/.agent-taskstate/agent-taskstate.db') }}"
         TASK_ID="{{ trigger.body.task_id }}"
+        RUN_ID=$(cat {{ outputDir }}/run_id.txt)
 
         if [ "$STATUS" = "done" ]; then
           # Update run to succeeded
-          python "$CLI_PATH" --db "$DB_PATH" run update \
-            --task "$TASK_ID" \
-            --agent kestra-worker \
-            --status succeeded \
-            --reason "Worker completed successfully"
+          python "$CLI_PATH" --db "$DB_PATH" run finish \
+            --run "$RUN_ID" \
+            --status succeeded
 
           # Update task to done
           python "$CLI_PATH" --db "$DB_PATH" task set-status \
@@ -252,11 +257,9 @@ tasks:
             --reason "Worker completed successfully"
         else
           # Update run to failed
-          python "$CLI_PATH" --db "$DB_PATH" run update \
-            --task "$TASK_ID" \
-            --agent kestra-worker \
-            --status failed \
-            --reason "Worker failed - requires review"
+          python "$CLI_PATH" --db "$DB_PATH" run finish \
+            --run "$RUN_ID" \
+            --status failed
 
           # Update task to review
           python "$CLI_PATH" --db "$DB_PATH" task set-status \
