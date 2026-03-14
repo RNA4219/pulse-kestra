@@ -44,21 +44,32 @@ class Settings(BaseSettings):
     def taskstate_cli_command(self) -> list[str]:
         """Build taskstate CLI command.
 
-        Default: sys.executable + agent-taskstate/docs/src/agent-taskstate_cli.py --db {db}
+        Contract: sys.executable + agent-taskstate_cli.py --db {db}
+
+        If PULSE_TASKSTATE_CLI_PATH is specified and ends with .py,
+        always use sys.executable to run it (for Windows compatibility).
+        For other executables (.exe, etc.), use the path directly.
         """
+        cli_path: Path
+
         if self.taskstate_cli_path:
             cli_path = Path(self.taskstate_cli_path)
-            if cli_path.is_absolute():
-                return [str(cli_path), "--db", self.taskstate_db]
-            # Relative path from bridge directory
-            return [str(Path(__file__).parent.parent.parent.parent.parent / cli_path), "--db", self.taskstate_db]
+            if not cli_path.is_absolute():
+                # Relative path from repo root
+                cli_path = Path(__file__).parent.parent.parent.parent.parent / cli_path
+        else:
+            # Default path
+            cli_path = (
+                Path(__file__).parent.parent.parent.parent.parent
+                / "agent-taskstate" / "docs" / "src" / "agent-taskstate_cli.py"
+            )
 
-        # Default path
-        default_cli = (
-            Path(__file__).parent.parent.parent.parent.parent
-            / "agent-taskstate" / "docs" / "src" / "agent-taskstate_cli.py"
-        )
-        return [sys.executable, str(default_cli), "--db", self.taskstate_db]
+        # Always use sys.executable for Python scripts (Windows compatibility)
+        if str(cli_path).endswith(".py"):
+            return [sys.executable, str(cli_path), "--db", self.taskstate_db]
+        else:
+            # For .exe or other executables, run directly
+            return [str(cli_path), "--db", self.taskstate_db]
 
     @property
     def kestra_webhook_url(self) -> str:

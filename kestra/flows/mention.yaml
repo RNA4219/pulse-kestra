@@ -115,7 +115,7 @@ tasks:
     type: io.kestra.plugin.scripts.shell.Commands
     description: "Execute Roadmap Design Skill"
     beforeCommands:
-      - cd {{ globals.roadsap_design_skill_path | default('C:/Users/ryo-n/Codex_dev/Roadmap-Design-Skill') }}
+      - cd {{ globals.roadmap_design_skill_path | default('C:/Users/ryo-n/Codex_dev/Roadmap-Design-Skill') }}
     commands:
       - |
         python -m wrappers.cli.main run --no-llm \
@@ -131,7 +131,10 @@ tasks:
       with open("{{ outputDir }}/worker_response.json", "r") as f:
           response = json.load(f)
 
+      # Initialize phases to empty list to avoid undefined reference
+      phases = []
       run_status = response.get("run", {}).get("status", "")
+
       if run_status != "completed":
           error_msg = response.get("run", {}).get("message", "Unknown error")
           reply_text = f"ロードマップ生成中にエラーが発生しました: {error_msg}"

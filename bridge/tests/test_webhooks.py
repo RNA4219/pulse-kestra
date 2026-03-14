@@ -553,3 +553,176 @@ class TestInputGuardIntegration:
 
         # Should still process (202) even with needs_review
         assert response.status_code == 202
+
+
+class TestStatePutAndSetStatusFailure:
+    """Tests for state put and set-status failure handling.
+
+    Phase 1 contract: task create -> state put -> status ready -> Kestra trigger
+    If any step fails, return 502 and do NOT call Kestra.
+    """
+
+    def test_state_put_failure_returns_502_no_kestra(self, client):
+        """Test that state put failure returns 502 and Kestra is not called.
+
+        This is a Phase 1 contract requirement.
+        """
+        kestra_call_count = 0
+
+        def track_kestra_call(request):
+            nonlocal kestra_call_count
+            kestra_call_count += 1
+            return httpx.Response(200, json={"id": "exec123"})
+
+        call_count = 0
+
+        def mock_subprocess_run(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            # First call: task create (success)
+            if call_count == 1:
+                return MagicMock(
+                    returncode=0,
+                    stdout=json.dumps({"ok": True, "data": {"id": "task123"}}),
+                    stderr="",
+                )
+            # Second call: state put (failure)
+            elif call_count == 2:
+                return MagicMock(
+                    returncode=1,
+                    stdout="",
+                    stderr="State put failed",
+                )
+            # Should not reach here
+            return MagicMock(returncode=1, stdout="", stderr="Unexpected call")
+
+        with patch("bridge.services.taskstate_gateway.subprocess.run", side_effect=mock_subprocess_run):
+            with respx.mock:
+                respx.post("http://localhost:8080/api/v1/main/executions/webhook/pulse/mention/test-key").mock(
+                    side_effect=track_kestra_call
+                )
+
+                response = client.post(
+                    "/webhooks/misskey",
+                    json={
+                        "type": "mention",
+                        "body": {
+                            "note": {
+                                "id": "note123",
+                                "text": "@pulse roadmap\n```json\n{\"goal\": \"test\"}\n```",
+                            },
+                        },
+                    },
+                    headers={"X-Misskey-Hook-Secret": "test-secret"},
+                )
+
+        assert response.status_code == 502
+        assert "state" in response.json()["detail"].lower()
+        # Kestra should NOT be called
+        assert kestra_call_count == 0, "Kestra must not be called when state put fails"
+
+    def test_set_status_failure_returns_502_no_kestra(self, client):
+        """Test that set-status failure returns 502 and Kestra is not called.
+
+        This is a Phase 1 contract requirement.
+        """
+        kestra_call_count = 0
+
+        def track_kestra_call(request):
+            nonlocal kestra_call_count
+            kestra_call_count += 1
+            return httpx.Response(200, json={"id": "exec123"})
+
+        call_count = 0
+
+        def mock_subprocess_run(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            # First call: task create (success)
+            if call_count == 1:
+                return MagicMock(
+                    returncode=0,
+                    stdout=json.dumps({"ok": True, "data": {"id": "task123"}}),
+                    stderr="",
+                )
+            # Second call: state put (success)
+            elif call_count == 2:
+                return MagicMock(
+                    returncode=0,
+                    stdout=json.dumps({"ok": True, "data": {"current_step": "test"}}),
+                    stderr="",
+                )
+            # Third call: set-status ready (failure)
+            elif call_count == 3:
+                return MagicMock(
+                    returncode=1,
+                    stdout="",
+                    stderr="Set status failed",
+                )
+            # Should not reach here
+            return MagicMock(returncode=1, stdout="", stderr="Unexpected call")
+
+        with patch("bridge.services.taskstate_gateway.subprocess.run", side_effect=mock_subprocess_run):
+            with respx.mock:
+                respx.post("http://localhost:8080/api/v1/main/executions/webhook/pulse/mention/test-key").mock(
+                    side_effect=track_kestra_call
+                )
+
+                response = client.post(
+                    "/webhooks/misskey",
+                    json={
+                        "type": "mention",
+                        "body": {
+                            "note": {
+                                "id": "note123",
+                                "text": "@pulse roadmap\n```json\n{\"goal\": \"test\"}\n```",
+                            },
+                        },
+                    },
+                    headers={"X-Misskey-Hook-Secret": "test-secret"},
+                )
+
+        assert response.status_code == 502
+        assert "status" in response.json()["detail"].lower()
+        # Kestra should NOT be called
+        assert kestra_call_count == 0, "Kestra must not be called when set-status fails"
+
+    def test_all_steps_success_then_kestra_called(self, client):
+        """Test that all steps must succeed before Kestra is called."""
+        kestra_call_count = 0
+
+        def track_kestra_call(request):
+            nonlocal kestra_call_count
+            kestra_call_count += 1
+            return httpx.Response(200, json={"id": "exec123"})
+
+        with patch("bridge.services.taskstate_gateway.subprocess.run") as mock_run:
+            # All calls succeed
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout=json.dumps({"ok": True, "data": {"id": "task123"}}),
+                stderr="",
+            )
+
+            with respx.mock:
+                respx.post("http://localhost:8080/api/v1/main/executions/webhook/pulse/mention/test-key").mock(
+                    side_effect=track_kestra_call
+                )
+
+                response = client.post(
+                    "/webhooks/misskey",
+                    json={
+                        "type": "mention",
+                        "body": {
+                            "note": {
+                                "id": "note123",
+                                "text": "@pulse roadmap\n```json\n{\"goal\": \"test\"}\n```",
+                            },
+                        },
+                    },
+                    headers={"X-Misskey-Hook-Secret": "test-secret"},
+                )
+
+        assert response.status_code == 202
+        # Kestra SHOULD be called when all steps succeed
+        assert kestra_call_count == 1, "Kestra should be called when all steps succeed"

@@ -214,7 +214,11 @@ async def handle_misskey_webhook(
             "Failed to put state",
             extra={"trace_id": envelope.trace_id, "task_id": task_id, "error": state_result.error},
         )
-        # Continue anyway - task is created
+        # Phase 1 contract: state put is required before Kestra trigger
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to put state: {state_result.error}",
+        )
 
     # 7. Set status to ready (maps to queued)
     status_result = gateway.set_status(
@@ -228,7 +232,11 @@ async def handle_misskey_webhook(
             "Failed to set status",
             extra={"trace_id": envelope.trace_id, "task_id": task_id, "error": status_result.error},
         )
-        # Continue anyway - task is created
+        # Phase 1 contract: status ready is required before Kestra trigger
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to set status: {status_result.error}",
+        )
 
     # 8. Trigger Kestra flow
     kestra_client = KestraClient(settings)

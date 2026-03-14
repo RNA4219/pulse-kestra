@@ -1,0 +1,659 @@
+# pulse-kestra 要件定義
+
+## 1. 概要
+
+`pulse-kestra` は、Misskey を会話・通知の表層とし、Kestra をイベント駆動の制御基盤として用い、既存の各種ワーカー OSS を接続するための **薄いオーケストレーション層** である。
+
+本システムは以下を目的とする。
+
+* Misskey からの会話イベントを受信し、安全に正規化して処理する
+* 定期実行・heartbeat により、自律的な巡回・監視・再実行を行う
+* `agent-taskstate` を正本とした状態管理を維持する
+* `memx-resolver` / `insight-agent` / `experiment-gate` / `Roadmap-Design-Skill` など既存ワーカーを疎結合で接続する
+* 将来的な検索強化、外部 API 連携、ワーカー追加、N100 など低消費電力環境への移植を容易にする
+
+本システムは **会話 AI 本体** ではなく、**イベントループ + 状態遷移 + ワーカー接続** を担う制御層である。
+Kestra は webhook / schedule などの trigger と plugin 拡張を持つため、本要件の土台として採用する。Misskey は webhook によるイベント通知と API による投稿が可能である。
+
+---
+
+## 2. 背景
+
+既存 OSS 群により、以下の「臓器」は概ね揃っている。
+
+* ワークフロー/運用知
+* 文脈解決/メモリ参照
+* タスク状態管理
+* 洞察抽出
+* 実験実行可否判定
+* ロードマップ設計
+* 活動ポリシー
+
+一方で不足しているのは、以下の **循環器・神経系** である。
+
+* 入口の統一
+* 発火条件の定義
+* handoff の規約
+* 状態遷移の中核
+* 非同期実行の交通整理
+* 安全な Misskey 接続
+* 軽量な heartbeat 制御
+
+`pulse-kestra` はこれを補う。
+
+---
+
+## 3. スコープ
+
+### 3.1 本システムが扱うもの
+
+* Misskey webhook の受信
+* Misskey API による返信/通知
+* EventEnvelope への正規化
+* 入力ガード
+* `agent-taskstate` へのタスク起票/更新
+* Kestra による flow 実行
+* 既存ワーカーの呼び出し
+* heartbeat / schedule による定期処理
+* 実行ログ、エラー、再試行制御
+
+### 3.2 本システムが扱わないもの
+
+* Misskey 本体の運用
+* 重量級ローカル LLM 推論
+* 長期的な検索インデックス基盤そのものの実装
+* UI フロントエンドの全面刷新
+* 自律人格の高度な会話設計そのもの
+
+---
+
+## 4. 目的
+
+### 4.1 主目的
+
+1. Misskey 上のエージェント運用を安全かつ安定に実現する
+2. 会話イベントと定期処理を単一のイベントモデルに統合する
+3. 既存ワーカー群を差し替え可能なまま接続する
+4. 軽量環境でも稼働可能な設計を維持する
+
+### 4.2 副目的
+
+* 検索強化の差し込み点を用意する
+* 将来の custom plugin 化を見据えつつ、初期実装は薄く保つ
+* デスクトップ検証から N100 移植までの移行コストを下げる
+
+---
+
+## 5. 想定ユースケース
+
+### 5.1 会話駆動
+
+* Misskey で mention される
+* webhook を受信する
+* bridge が入力を検証する
+* タスクを起票する
+* ワーカーを実行する
+* 結果を Misskey に返信する
+
+### 5.2 heartbeat 駆動
+
+* 15分ごとに schedule trigger が発火する
+* 未処理タスクや期限到来タスクを探索する
+* 必要なものだけ再実行/通知する
+
+### 5.3 巡回・検索強化
+
+* 定期的に外部情報源を検索する
+* 結果を整形/再ランキングする
+* 条件を満たした場合のみ通知または保存する
+
+---
+
+## 6. システム構成
+
+```text
+Misskey
+  ├─ Webhook (mention / reply / etc.)
+  └─ API (notes/create)
+
+        ↓
+
+pulse-kestra bridge
+  ├─ secret validation
+  ├─ input guard
+  ├─ event normalization
+  └─ task enqueue / trigger
+
+        ↓
+
+Kestra
+  ├─ webhook-triggered flow
+  ├─ schedule-triggered flow
+  └─ heartbeat flow
+
+        ↓
+
+State / Context / Workers
+  ├─ agent-taskstate
+  ├─ memx-resolver
+  ├─ insight-agent
+  ├─ experiment-gate
+  └─ Roadmap-Design-Skill
+
+        ↓
+
+Result
+  ├─ state update
+  ├─ artifact/log
+  └─ Misskey reply/notify
+```
+
+---
+
+## 7. 役割分担
+
+### 7.1 Misskey
+
+* 会話 UI
+* ユーザー入力の入口
+* 結果通知の出口
+
+### 7.2 pulse-kestra bridge
+
+* Misskey 依存 I/F の吸収
+* webhook 検証
+* EventEnvelope 化
+* 入力ガード
+* Kestra 呼び出し
+
+### 7.3 Kestra
+
+* flow 制御
+* trigger 管理
+* 実行順序制御
+* 再試行/スケジューリング
+* ワーカー呼び出し
+
+### 7.4 agent-taskstate
+
+* タスク状態の正本
+* run / decision / question / context の保存
+* 会話履歴ではなく状態ベースの管理
+
+### 7.5 各ワーカー
+
+* 文脈取得
+* 洞察生成
+* 可否判定
+* 設計支援
+* 検索強化
+
+---
+
+## 8. 機能要件
+
+## 8.1 イベント受信
+
+### FR-001
+
+システムは Misskey webhook を HTTP で受信できなければならない。
+
+### FR-002
+
+システムは webhook secret を検証し、不正なリクエストを拒否しなければならない。
+
+### FR-003
+
+システムは受信イベントから `mention` を識別できなければならない。
+
+### FR-004
+
+システムは不要なイベント種別を無視できなければならない。
+
+---
+
+## 8.2 入力ガード
+
+### FR-010
+
+システムは入力本文に対して軽量な安全性検査を実施できなければならない。
+
+### FR-011
+
+ガード結果に応じて以下を実行できなければならない。
+
+* 通過
+* 拒否
+* 要レビュー
+* ログのみ
+
+### FR-012
+
+入力ガードは初期段階では入力のみ対象とし、出力ガードは任意機能とする。
+
+---
+
+## 8.3 イベント正規化
+
+### FR-020
+
+システムはすべての入口イベントを共通 EventEnvelope に変換しなければならない。
+
+### FR-021
+
+EventEnvelope は最低限以下を保持しなければならない。
+
+* `event_id`
+* `event_type`
+* `source`
+* `timestamp`
+* `actor`
+* `payload`
+* `trace_id`
+
+### FR-022
+
+手動実行、webhook、schedule、heartbeat は同一 envelope 形式を共有しなければならない。
+
+---
+
+## 8.4 状態管理
+
+### FR-030
+
+システムは EventEnvelope 受信後、`agent-taskstate` に task/run を起票できなければならない。
+
+### FR-031
+
+システムは task の状態を以下で管理しなければならない。
+
+* `queued`
+* `running`
+* `waiting`
+* `needs_review`
+* `done`
+* `failed`
+* `cancelled`
+
+### FR-032
+
+システムはワーカー実行結果に応じて taskstate を更新しなければならない。
+
+### FR-033
+
+Kestra の実行履歴と taskstate の業務状態を分離しなければならない。
+
+---
+
+## 8.5 ワーカー実行
+
+### FR-040
+
+システムは少なくとも 1 種類のワーカーを外部プロセスまたは API として呼び出せなければならない。
+
+### FR-041
+
+初期対応ワーカー候補は以下とする。
+
+* `memx-resolver`
+* `insight-agent`
+* `experiment-gate`
+* `Roadmap-Design-Skill`
+
+### FR-042
+
+ワーカーの呼び出しインターフェースは adapter 層で吸収しなければならない。
+
+### FR-043
+
+ワーカーは将来的に追加・削除・差し替えが可能でなければならない。
+
+---
+
+## 8.6 Misskey 返信
+
+### FR-050
+
+システムは Misskey API を通じて返信投稿を行えなければならない。
+
+### FR-051
+
+返信内容は少なくとも以下の 3 種類を扱えなければならない。
+
+* 固定文返信
+* ワーカー結果返信
+* エラー通知
+
+### FR-052
+
+返信処理は worker 実行と疎結合でなければならない。
+
+---
+
+## 8.7 heartbeat / schedule
+
+### FR-060
+
+システムは定期実行 trigger を持たなければならない。
+
+### FR-061
+
+heartbeat は軽量に設計し、原則として以下のみを行う。
+
+* 期限到来確認
+* retry 対象確認
+* stuck task 確認
+* 未通知結果確認
+
+### FR-062
+
+heartbeat は重いワーカー処理を直接内包せず、必要時のみ別 task を発行しなければならない。
+
+---
+
+## 8.8 検索強化
+
+### FR-070
+
+システムは検索処理を独立ワーカーまたは外部 API 呼び出しとして追加できなければならない。
+
+### FR-071
+
+検索強化では少なくとも以下を差し込めるべきである。
+
+* query rewrite
+* multi-source fan-out
+* rerank
+* dedup
+* score normalization
+* summarize-before-reply
+
+### FR-072
+
+検索強化機能は、flow、script、または plugin として後付け可能でなければならない。 Kestra は HTTP task、script task、plugin 拡張を持つため、この要件に適合する。
+
+---
+
+## 9. 非機能要件
+
+## 9.1 軽量性
+
+### NFR-001
+
+デスクトップ環境および N100/16GB 級の低消費電力マシンへの移植を前提に、オーケストレーション層は軽量でなければならない。
+
+### NFR-002
+
+重い推論は原則として外部 API または別ホストへ逃がせる設計でなければならない。
+
+---
+
+## 9.2 可用性
+
+### NFR-010
+
+Misskey 本体とは別ホストで動作可能でなければならない。
+
+### NFR-011
+
+bridge または Kestra 障害時でも Misskey 本体の稼働に影響を最小化しなければならない。
+
+### NFR-012
+
+webhook 受信部は短時間で応答し、重処理は非同期化しなければならない。
+
+---
+
+## 9.3 拡張性
+
+### NFR-020
+
+新規ワーカー追加時に既存フロー全体を大規模改修しないこと。
+
+### NFR-021
+
+検索、通知先、入力ガード、出力ガードは段階的に追加可能であること。
+
+### NFR-022
+
+Misskey 依存部分は bridge 層に閉じ込めること。
+
+---
+
+## 9.4 観測性
+
+### NFR-030
+
+各イベントには trace_id を付与し、bridge、Kestra、taskstate、worker を横断して追跡可能とする。
+
+### NFR-031
+
+最低限以下をログとして残す。
+
+* webhook 受信
+* secret 検証結果
+* guard 判定
+* task 起票
+* worker 実行開始/終了
+* Misskey 投稿結果
+* エラー
+
+---
+
+## 9.5 保守性
+
+### NFR-040
+
+初期実装では Kestra 本体 fork を行わない。
+
+### NFR-041
+
+bridge は薄く、業務ロジックを持ち込みすぎない。
+
+### NFR-042
+
+plugin 化は反復利用が確認された処理に限定する。
+
+---
+
+## 10. インターフェース要件
+
+## 10.1 Misskey Webhook 入力
+
+### 入力
+
+* HTTP POST
+* JSON body
+* secret header
+
+### 必須処理
+
+* secret 検証
+* event type 判定
+* mention 抽出
+* EventEnvelope 化
+
+---
+
+## 10.2 Kestra 起動 I/F
+
+### 方式候補
+
+* Webhook trigger
+* API trigger
+* schedule trigger
+
+### 初期方針
+
+* bridge → Kestra webhook trigger
+
+---
+
+## 10.3 Worker Adapter I/F
+
+最低限、以下の統一構造を持つこと。
+
+```json
+{
+  "task_id": "string",
+  "worker": "string",
+  "input": {},
+  "context": {},
+  "constraints": [],
+  "trace_id": "string"
+}
+```
+
+返却は以下を基本とする。
+
+```json
+{
+  "status": "success|failed|needs_review",
+  "summary": "string",
+  "artifacts": [],
+  "structured_output": {},
+  "confidence": 0.0,
+  "next_action": "string"
+}
+```
+
+---
+
+## 11. データモデル要件
+
+## 11.1 EventEnvelope
+
+```json
+{
+  "event_id": "evt_xxx",
+  "event_type": "misskey.mention|manual|schedule|heartbeat",
+  "source": "misskey|kestra|manual",
+  "timestamp": "ISO8601",
+  "actor": {
+    "id": "string",
+    "username": "string"
+  },
+  "payload": {},
+  "trace_id": "trace_xxx"
+}
+```
+
+## 11.2 TaskRecord
+
+```json
+{
+  "task_id": "tsk_xxx",
+  "status": "queued|running|waiting|needs_review|done|failed|cancelled",
+  "trigger": "misskey.mention|heartbeat|schedule",
+  "worker": "string",
+  "retry_count": 0,
+  "created_at": "ISO8601",
+  "updated_at": "ISO8601",
+  "trace_id": "trace_xxx"
+}
+```
+
+---
+
+## 12. フロー要件
+
+## 12.1 会話フロー
+
+1. Misskey mention
+2. bridge 受信
+3. secret 検証
+4. input guard
+5. EventEnvelope 化
+6. taskstate 起票
+7. Kestra flow 起動
+8. worker 実行
+9. taskstate 更新
+10. Misskey 返信
+
+## 12.2 heartbeat フロー
+
+1. schedule trigger
+2. due/stuck/retry 対象探索
+3. task 発行
+4. 必要 worker 実行
+5. 状態更新
+6. 通知要否判定
+
+---
+
+## 13. フェーズ要件
+
+## Phase 1: 最小 PoC
+
+* Kestra ローカル起動
+* bridge 構築
+* Misskey webhook 受信
+* 固定文返信
+* taskstate 起票
+* 1 worker 接続
+
+## Phase 2: 運用可能化
+
+* heartbeat 追加
+* retry 制御
+* エラー分類
+* trace_id 運用
+* secrets 管理
+* PostgreSQL 永続化
+
+## Phase 3: 拡張
+
+* 検索強化
+* rerank
+* output guard
+* 複数 worker chaining
+* plugin 化
+
+---
+
+## 14. 受け入れ条件
+
+以下を満たしたとき、Phase 1 完了とする。
+
+1. Misskey の mention から webhook を受信できる
+2. secret 検証が通る
+3. 入力ガードが動く
+4. EventEnvelope が生成される
+5. taskstate に task/run が保存される
+6. Kestra flow が起動する
+7. 1つの worker が呼び出される
+8. 結果または固定文が Misskey に返信される
+9. 一連の trace_id をログで追跡できる
+
+---
+
+## 15. リスク
+
+* webhook 再送による二重起票
+* 入力ガードの誤検知
+* taskstate と Kestra 実行状態の乖離
+* Misskey API 制限やトークン権限不足
+* worker のタイムアウト設計不足
+* heartbeat の肥大化
+* plugin 化の早すぎる着手による保守コスト増
+
+---
+
+## 16. 設計原則
+
+1. **薄く作る**
+2. **正本は taskstate**
+3. **Misskey 依存は bridge に閉じ込める**
+4. **heartbeat は軽く**
+5. **重い推論は外に逃がす**
+6. **flow は増やしても本体は太らせない**
+7. **plugin は最後**
+
+---
+
+他に必要なファイル
+
+* `README.md`
+* `docs/architecture.md`
+* `docs/flows.md`
+* `docs/event-schema.md`
