@@ -377,6 +377,14 @@ class TestTaskstateCalls:
         assert put_state_call_found, "state put should be called"
         assert set_status_call_found, "set-status should be called"
 
+        create_calls = [call[0][0] for call in mock_run.call_args_list if "task" in call[0][0] and "create" in call[0][0]]
+        assert create_calls
+        create_args = create_calls[0]
+        create_payload = json.loads(create_args[create_args.index("--json") + 1])
+        assert create_payload["reply_target"] == "note123"
+        assert create_payload["trigger"] == "mention"
+        assert create_payload["roadmap_request_json"]["goal"] == "Build app"
+
 
 class TestKestraPayload:
     """Tests for Kestra payload contents."""

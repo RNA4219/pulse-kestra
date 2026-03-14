@@ -104,13 +104,22 @@ tasks:
       original_task = json.loads(result.stdout).get("data", {})
 
       # Prepare replay data
+      roadmap_request = None
+      roadmap_request_json = original_task.get("roadmap_request_json")
+      if roadmap_request_json:
+          try:
+              roadmap_request = json.loads(roadmap_request_json)
+          except json.JSONDecodeError:
+              roadmap_request = None
+
       replay_data = {
           "original_task_id": ORIGINAL_TASK_ID,
           "replay_type": REPLAY_TYPE,
           "trace_id": original_task.get("trace_id", ""),
           "note_id": original_task.get("note_id", ""),
           "reply_target": original_task.get("reply_target", original_task.get("note_id", "")),
-          "roadmap_request": original_task.get("roadmap_request"),
+          "reply_text": original_task.get("reply_text", "処理が完了しました。詳細は別途ご確認ください。"),
+          "roadmap_request": roadmap_request,
           "retry_count": original_task.get("retry_count", 0) + 1,
           "idempotency_key": original_task.get("idempotency_key", ""),
       }
@@ -155,7 +164,10 @@ tasks:
           "retry_count": replay_data["retry_count"],
           "original_task_id": replay_data["original_task_id"],
           "reply_target": replay_data["reply_target"],
-          "trigger": "manual.replay"
+          "reply_state": "pending",
+          "reply_text": replay_data.get("reply_text", ""),
+          "roadmap_request_json": replay_data.get("roadmap_request"),
+          "trigger": "manual_replay"
       }
 
       cmd = [sys.executable, CLI_PATH, "--db", DB_PATH, "task", "create",
@@ -192,10 +204,10 @@ tasks:
       import json
       from datetime import datetime, timezone
 
-      with open("{{ outputs.get-original-task.outputFiles['original_task.json'] }}") as f:
-          original_task = json.load(f)
+      with open("{{ outputs.get-original-task.outputFiles['replay_data.json'] }}") as f:
+          replay_data = json.load(f)
 
-      roadmap_request = original_task.get("roadmap_request")
+      roadmap_request = replay_data.get("roadmap_request")
 
       if not roadmap_request:
           # No roadmap_request, create minimal placeholder
@@ -231,7 +243,7 @@ tasks:
       with open("{{ outputDir }}/worker_request.json", "w") as f:
           json.dump(worker_request, f, indent=2)
 
-      print(f"Worker request prepared for task {original_task.get('id')}")
+      print(f"Worker request prepared for replay task {replay_data.get('original_task_id')}")
 
   # 3a. Branch: Full or Worker-only replay
   - id: run-worker-if-needed
@@ -327,7 +339,7 @@ tasks:
       {
         "i": "{{ secret('MISSKEY_API_TOKEN') }}",
         "replyId": "{{ outputs.get-original-task.outputFiles['replay_data.json'] | json(data='reply_target') }}",
-        "text": "{{ inputs.replay_type == 'notifier_only' ? '通知を再送しました。' : outputs.extract-reply-if-needed.outputFiles['reply_text.txt'] }}",
+        "text": "{{ inputs.replay_type == 'notifier_only' ? outputs.get-original-task.outputFiles['replay_data.json'] | json(data='reply_text') : outputs.extract-reply-if-needed.outputFiles['reply_text.txt'] }}",
         "visibility": "home"
       }
 
@@ -381,9 +393,17 @@ tasks:
           print(f"Failed to transition to done: {result.stderr}")
           sys.exit(1)
 
-      # Update reply_state to sent
+      reply_text = None
+      if "{{ inputs.replay_type }}" == "notifier_only":
+          with open("{{ outputs.get-original-task.outputFiles['replay_data.json'] }}") as f:
+              reply_text = json.load(f).get("reply_text", "")
+      else:
+          with open("{{ outputs.extract-reply-if-needed.outputFiles['reply_text.txt'] }}", "r", encoding="utf-8") as f:
+              reply_text = f.read()
+
+      # Update reply_state to sent and persist reply_text
       run_cli(["task", "update", "--task", new_task_id, "--json",
-               json.dumps({"reply_state": "sent"})])
+               json.dumps({"reply_state": "sent", "reply_text": reply_text}, ensure_ascii=False)])
 
       result = {"success": True, "task_id": new_task_id}
       with open("{{ outputDir }}/finalize_result.json", "w") as f:

@@ -38,10 +38,11 @@ Phase 2 の heartbeat は新しい業務処理を増やすためではなく、P
 1. Kestra の schedule trigger が heartbeat flow を起動する
 2. flow が `agent-taskstate` から retry 対象、stuck task、未通知結果、手動回復待ち task を探索する
 3. `reply_state=pending|failed` の task は notifier 再送候補として抽出する
-4. `in_progress` のまま閾値超過した task は stuck 候補として抽出する
-5. retry 可能な task は child run または replay task を発行する
-6. 重い worker 処理が必要なものは別 flow へ委譲する
-7. 結果を taskstate、reply 状態、ログへ反映する
+4. heartbeat は Misskey へ直接投稿せず、`notifier-resend` flow を起動して再送を委譲する
+5. `in_progress` のまま閾値超過した task は stuck 候補として抽出する
+6. retry 可能な task は `manual-replay` flow を起動して replay を委譲する
+7. 重い worker 処理が必要なものは別 flow へ委譲する
+8. 結果を taskstate、reply 状態、ログへ反映する
 
 ### 2.3 制約
 
@@ -63,8 +64,9 @@ Phase 2 の heartbeat は新しい業務処理を増やすためではなく、P
 1. オペレータが task ID または trace ID を指定して再実行要求を出す
 2. bridge または Kestra manual trigger が `manual` EventEnvelope を生成する
 3. 元 task との関連、`retry_count`、`idempotency_key` を保持したまま新規 run を起票する
-4. 指定 worker または notifier を再実行する
-5. replay 対象が通知だけの場合は worker を再実行せず reply のみ再送する
+4. `roadmap_request_json` と `reply_text` を task 正本から引き継ぐ
+5. 指定 worker または notifier を再実行する
+6. replay 対象が通知だけの場合は worker を再実行せず、保存済み `reply_text` をそのまま再送する
 
 ## 4. retry フロー
 

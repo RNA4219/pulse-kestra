@@ -114,6 +114,7 @@ async def handle_misskey_webhook(
             note_id=result.note_id or "",
             username=result.username,
             command=result.command or "guard_rejected",
+            reply_target=result.note_id or "",
         )
 
         if task_result.success and task_result.data:
@@ -288,6 +289,8 @@ async def handle_misskey_webhook(
         note_id=result.note_id or "",
         username=result.username,
         command=result.command,
+        reply_target=result.note_id or "",
+        roadmap_request=roadmap_request_dict,
     )
 
     if not task_result.success:
@@ -320,18 +323,6 @@ async def handle_misskey_webhook(
             "trace_id": envelope.trace_id,
             "task_id": task_id,
             "retry_count": 0,  # New task starts with retry_count=0
-        },
-    )
-
-    # 5b. Update task with Phase 2 fields
-    gateway.update_task(
-        task_id=task_id,
-        fields={
-            "idempotency_key": idempotency_key,
-            "note_id": result.note_id or "",
-            "reply_target": result.note_id or "",
-            "reply_state": "pending",
-            "trace_id": envelope.trace_id,
         },
     )
 

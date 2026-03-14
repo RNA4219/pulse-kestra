@@ -140,6 +140,10 @@ class TestKestraFlowConfiguration:
         assert "current_summary" in flow_content
         assert "state" in flow_content and "put" in flow_content
 
+    def test_mention_flow_persists_reply_text(self, flow_content):
+        assert '"reply_state": "sent", "reply_text": REPLY_TEXT' in flow_content
+        assert '"reply_state": "failed", "reply_text": REPLY_TEXT' in flow_content
+
 
 class TestHeartbeatFlowConfiguration:
     """Tests for heartbeat flow configuration and webhook URL."""
@@ -163,6 +167,10 @@ class TestHeartbeatFlowConfiguration:
     def test_uses_correct_webhook_key_secret(self, flow_content):
         """Verify that webhook uses PULSE_KESTRA_WEBHOOK_KEY secret."""
         assert "PULSE_KESTRA_WEBHOOK_KEY" in flow_content
+
+    def test_heartbeat_uses_reply_state_filter_and_notifier_resend_webhook(self, flow_content):
+        assert '--reply-state", reply_state' in flow_content or '--reply-state' in flow_content
+        assert '/api/v1/main/executions/webhook/pulse/notifier-resend/' in flow_content
 
 
 class TestManualReplayFlowConfiguration:
@@ -201,6 +209,11 @@ class TestManualReplayFlowConfiguration:
         """Verify that resolved task_id is output for use by downstream tasks."""
         assert "resolved_task_id.txt" in flow_content
         assert "outputs.resolve-task-id.outputFiles" in flow_content
+
+    def test_manual_replay_uses_stored_roadmap_request_and_reply_text(self, flow_content):
+        assert 'roadmap_request_json' in flow_content
+        assert 'reply_text' in flow_content
+        assert "outputs.get-original-task.outputFiles['replay_data.json'] | json(data='reply_text')" in flow_content
 
 
 class TestTaskIOValidation:

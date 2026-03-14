@@ -51,30 +51,24 @@ tasks:
       ])
       stuck_tasks = stuck_result.get("data", []) if stuck_result.get("ok") else []
 
-      # Find tasks with pending/failed replies
-      pending_result = run_cli([
-          "task", "list",
-          "--status", "done"
-      ])
-      done_tasks = pending_result.get("data", []) if pending_result.get("ok") else []
-
+      # Find tasks with pending/failed replies using Phase 2 filters
       pending_replies = []
       retry_candidates = []
-
-      for task in done_tasks:
-          reply_state = task.get("reply_state", "")
-          retry_count = task.get("retry_count", 0)
-          updated_at = task.get("updated_at", "")
-
-          # Check for pending/failed replies
-          if reply_state in ("pending", "failed"):
+      for reply_state in ("pending", "failed"):
+          pending_result = run_cli([
+              "task", "list",
+              "--reply-state", reply_state
+          ])
+          tasks = pending_result.get("data", []) if pending_result.get("ok") else []
+          for task in tasks:
               pending_replies.append({
                   "task_id": task["id"],
                   "reply_state": reply_state,
-                  "retry_count": retry_count,
+                  "retry_count": task.get("retry_count", 0),
                   "note_id": task.get("note_id", ""),
                   "reply_target": task.get("reply_target", ""),
                   "trace_id": task.get("trace_id", ""),
+                  "reply_text": task.get("reply_text", ""),
               })
 
       # Find retry candidates (failed with retry_count < max)
@@ -117,25 +111,20 @@ tasks:
       - Pending replies: {{ outputs.find-recovery-candidates.outputFiles['pending_replies.json'] }}
       - Retry candidates: {{ outputs.find-recovery-candidates.outputFiles['retry_candidates.json'] }}
 
-  # 3. Process pending replies (notifier resend)
+  # 3. Process pending replies (trigger notifier-resend flow)
   - id: process-pending-replies
     type: io.kestra.plugin.scripts.python.Script
-    description: "Resend failed/pending replies to Misskey"
+    description: "Trigger notifier-resend for failed/pending replies"
     outputFiles:
       - resend_results.json
     script: |
       import json
-      import sys
-      import subprocess
       import urllib.request
       import urllib.error
 
-      CLI_PATH = "{{ globals.taskstate_cli_path | default('C:/Users/ryo-n/Codex_dev/agent-taskstate/docs/src/agent-taskstate_cli.py') }}"
-      DB_PATH = "{{ globals.taskstate_db | default('C:/Users/ryo-n/.agent-taskstate/agent-taskstate.db') }}"
-      MISSKEY_API_URL = "{{ globals.misskey_api_url | default('http://misskey:3000/api') }}"
-      MISSKEY_TOKEN = "{{ secret('MISSKEY_API_TOKEN') }}"
+      KESTRA_BASE_URL = "{{ globals.kestra_base_url | default('http://localhost:8080') }}"
+      WEBHOOK_KEY = "{{ secret('PULSE_KESTRA_WEBHOOK_KEY') }}"
 
-      # Read pending replies
       with open("{{ outputs.find-recovery-candidates.outputFiles['pending_replies.json'] }}") as f:
           pending_replies = json.load(f)
 
@@ -143,62 +132,36 @@ tasks:
 
       for task in pending_replies:
           task_id = task["task_id"]
-          note_id = task.get("note_id", "")
-          reply_target = task.get("reply_target", note_id)
-
-          # Get reply text from task context or artifact
-          # For now, use a generic recovery message
-          reply_text = "処理が完了しました。詳細は別途ご確認ください。"
-
-          # Try to post reply
           try:
               payload = {
-                  "i": MISSKEY_TOKEN,
-                  "replyId": reply_target,
-                  "text": reply_text,
-                  "visibility": "home"
+                  "event": "notifier.resend",
+                  "task_id": task_id,
               }
-
               req = urllib.request.Request(
-                  f"{MISSKEY_API_URL}/notes/create",
+                  f"{KESTRA_BASE_URL}/api/v1/main/executions/webhook/pulse/notifier-resend/{WEBHOOK_KEY}",
                   data=json.dumps(payload).encode("utf-8"),
                   headers={"Content-Type": "application/json"},
                   method="POST"
               )
-
-              with urllib.request.urlopen(req, timeout=30) as resp:
-                  response = json.load(resp)
+              with urllib.request.urlopen(req, timeout=30):
                   success = True
           except urllib.error.HTTPError as e:
-              response = {"error": str(e)}
               success = False
+              error = str(e)
           except Exception as e:
-              response = {"error": str(e)}
               success = False
+              error = str(e)
 
-          # Update reply_state
-          new_reply_state = "sent" if success else "failed"
-
-          cmd = [sys.executable, CLI_PATH, "--db", DB_PATH,
-                 "task", "update", "--task", task_id,
-                 "--json", json.dumps({"reply_state": new_reply_state})]
-          subprocess.run(cmd, capture_output=True)
-
-          if success:
-              # Increment retry_count on success too (to track attempts)
-              pass
-
-          results.append({
-              "task_id": task_id,
-              "success": success,
-              "reply_state": new_reply_state
-          })
+          result = {"task_id": task_id, "success": success}
+          if not success:
+              result["error"] = error
+          results.append(result)
 
       with open("{{ outputDir }}/resend_results.json", "w") as f:
           json.dump(results, f, indent=2)
 
       successes = sum(1 for r in results if r["success"])
-      print(f"Resend completed: {successes}/{len(results)} successful")
+      print(f"Resend triggers completed: {successes}/{len(results)} successful")
 
   # 4. Process stuck tasks - mark for review
   - id: process-stuck-tasks

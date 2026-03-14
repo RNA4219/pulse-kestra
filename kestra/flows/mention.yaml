@@ -261,6 +261,9 @@ tasks:
       with open("{{ outputs.extract-reply.outputFiles['worker_status.json'] }}", "r") as f:
           WORKER_STATUS = json.load(f)
 
+      with open("{{ outputs.extract-reply.outputFiles['reply_text.txt'] }}", "r", encoding="utf-8") as f:
+          REPLY_TEXT = f.read()
+
       STATUS = WORKER_STATUS.get("status", "failed")
 
       def run_cli(args):
@@ -292,9 +295,9 @@ tasks:
           run_cli(["task", "set-status", "--task", TASK_ID, "--to", "done",
                    "--reason", "Worker completed successfully"])
 
-          # Update reply_state to sent (Phase 2)
+          # Update reply_state and persist reply_text for resend/replay
           run_cli(["task", "update", "--task", TASK_ID, "--json",
-                   json.dumps({"reply_state": "sent"})])
+                   json.dumps({"reply_state": "sent", "reply_text": REPLY_TEXT}, ensure_ascii=False)])
 
           result = {"success": True, "status": "done"}
       else:
@@ -305,9 +308,9 @@ tasks:
           run_cli(["task", "set-status", "--task", TASK_ID, "--to", "review",
                    "--reason", "Worker failed - requires review"])
 
-          # Update reply_state to failed (Phase 2)
+          # Update reply_state and persist reply_text for resend/replay
           run_cli(["task", "update", "--task", TASK_ID, "--json",
-                   json.dumps({"reply_state": "failed"})])
+                   json.dumps({"reply_state": "failed", "reply_text": REPLY_TEXT}, ensure_ascii=False)])
 
           result = {"success": True, "status": "failed"}
 

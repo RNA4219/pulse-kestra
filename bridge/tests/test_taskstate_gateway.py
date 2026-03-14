@@ -156,6 +156,8 @@ class TestTaskstateGateway:
                 note_id="note123",
                 username="testuser",
                 command="roadmap",
+                reply_target="note123",
+                roadmap_request={"goal": "Build app"},
             )
 
         assert result.success
@@ -169,8 +171,11 @@ class TestTaskstateGateway:
         assert payload["idempotency_key"] == "misskey:note123"
         assert payload["note_id"] == "note123"
         assert payload["trace_id"] == "trace123"
+        assert payload["reply_target"] == "note123"
         assert payload["reply_state"] == "pending"
         assert payload["retry_count"] == 0
+        assert payload["trigger"] == "mention"
+        assert payload["roadmap_request_json"] == {"goal": "Build app"}
 
     def test_find_by_idempotency_key(self, gateway):
         """Test find_by_idempotency_key method."""

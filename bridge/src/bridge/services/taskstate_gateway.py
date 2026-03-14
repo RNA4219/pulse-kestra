@@ -228,6 +228,8 @@ class TaskstateGateway:
         note_id: str,
         username: str | None,
         command: str,
+        reply_target: str | None = None,
+        roadmap_request: dict[str, Any] | None = None,
     ) -> TaskstateResult:
         """Create a task for a Misskey mention.
 
@@ -251,12 +253,14 @@ class TaskstateGateway:
             "priority": "medium",
             "owner_type": "agent",
             "owner_id": "pulse-bridge",
-            # Phase 2 fields
             "idempotency_key": f"misskey:{note_id}",
             "note_id": note_id,
             "trace_id": trace_id,
+            "reply_target": reply_target or note_id,
             "reply_state": "pending",
             "retry_count": 0,
+            "trigger": "mention",
+            "roadmap_request_json": roadmap_request,
         }
 
         args = ["task", "create", "--json", json.dumps(payload)]

@@ -241,9 +241,12 @@
 {
   "task_id": "tsk_xxx",
   "status": "queued|running|waiting|needs_review|done|failed|cancelled",
-  "trigger": "misskey.mention|heartbeat|schedule",
+  "trigger": "misskey.mention|heartbeat|schedule|manual_replay",
   "worker": "string",
   "retry_count": 0,
+  "reply_state": "pending|sent|failed|skipped",
+  "reply_text": "string",
+  "roadmap_request_json": "string",
   "created_at": "ISO8601",
   "updated_at": "ISO8601",
   "trace_id": "trace_xxx"
@@ -297,8 +300,9 @@ Phase 2 では次を追加の完了条件とする。
 1. heartbeat が retry 対象、stuck task、未通知結果を定期検査できる
 2. manual replay で task ID または trace ID から再実行できる
 3. durable dedupe により同一 note の二重起票を抑止できる
-4. Misskey 投稿失敗時に未通知状態を残し、再送導線へ引き渡せる
-5. 運用手順上、taskstate と Kestra の差分を追跡して回復できる
+4. `reply_text` と `roadmap_request_json` を task 正本に保存し、manual replay / notifier resend で再利用できる
+5. Misskey 投稿失敗時に未通知状態を残し、再送導線へ引き渡せる
+6. 運用手順上、taskstate と Kestra の差分を追跡して回復できる
 
 ## 10. リスク
 
