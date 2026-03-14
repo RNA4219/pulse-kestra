@@ -245,6 +245,7 @@ async def handle_misskey_webhook(
     if existing_task.success and existing_task.data:
         existing_status = existing_task.data.get("status", "")
         existing_task_id = existing_task.data.get("id", "")
+        existing_retry_count = existing_task.data.get("retry_count", 0)
 
         if existing_status == "done":
             logger.info(
@@ -252,6 +253,8 @@ async def handle_misskey_webhook(
                 extra={
                     "note_id": result.note_id,
                     "existing_task_id": existing_task_id,
+                    "existing_status": existing_status,
+                    "retry_count": existing_retry_count,
                 },
             )
             return Response(status_code=204)
@@ -263,6 +266,7 @@ async def handle_misskey_webhook(
                     "note_id": result.note_id,
                     "existing_task_id": existing_task_id,
                     "existing_status": existing_status,
+                    "retry_count": existing_retry_count,
                 },
             )
             return Response(status_code=204)
@@ -274,6 +278,7 @@ async def handle_misskey_webhook(
                 "note_id": result.note_id,
                 "existing_task_id": existing_task_id,
                 "existing_status": existing_status,
+                "retry_count": existing_retry_count,
             },
         )
 
@@ -311,7 +316,11 @@ async def handle_misskey_webhook(
 
     logger.info(
         "Task created",
-        extra={"trace_id": envelope.trace_id, "task_id": task_id},
+        extra={
+            "trace_id": envelope.trace_id,
+            "task_id": task_id,
+            "retry_count": 0,  # New task starts with retry_count=0
+        },
     )
 
     # 5b. Update task with Phase 2 fields
@@ -393,7 +402,8 @@ async def handle_misskey_webhook(
         extra={
             "trace_id": envelope.trace_id,
             "task_id": task_id,
-            "execution_id": kestra_result.execution_id,
+            "kestra_execution_id": kestra_result.execution_id,
+            "reply_state": "pending",
         },
     )
 

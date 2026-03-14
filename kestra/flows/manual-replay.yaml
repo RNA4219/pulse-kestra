@@ -126,22 +126,101 @@ tasks:
 
       print(json.dumps(output, indent=2))
 
+  # 2b. Transform roadmap_request to worker request format
+  - id: transform-request
+    type: io.kestra.plugin.scripts.python.Script
+    description: "Build worker request from roadmap_request"
+    disabled: "{{ inputs.replay_type == 'notifier_only' }}"
+    outputFiles:
+      - worker_request.json
+    script: |
+      import json
+      from datetime import datetime, timezone
+
+      with open("{{ outputDir }}/original_task.json") as f:
+          original_task = json.load(f)
+
+      roadmap_request = original_task.get("roadmap_request")
+
+      if not roadmap_request:
+          # No roadmap_request, create minimal placeholder
+          worker_request = {
+              "schema_version": "1.0.0",
+              "mode": "roadmap",
+              "problem_statement": {
+                  "problem_id": "pb_replay_001",
+                  "title": "Manual Replay",
+                  "statement": "Re-executing previous request"
+              },
+              "insights": [{
+                  "insight_id": "in_replay_001",
+                  "statement": "This is a replay execution"
+              }],
+              "constraints": [{
+                  "constraint_id": "co_replay_001",
+                  "category": "other",
+                  "statement": "Replay mode",
+                  "severity": "soft"
+              }],
+              "available_assets": [{
+                  "asset_id": "as_replay_001",
+                  "type": "skill",
+                  "name": "replay",
+                  "description": "Replay capability"
+              }]
+          }
+      else:
+          # Use the stored roadmap_request directly
+          worker_request = roadmap_request
+
+      with open("{{ outputDir }}/worker_request.json", "w") as f:
+          json.dump(worker_request, f, indent=2)
+
+      print(f"Worker request prepared for task {original_task.get('id')}")
+
   # 3a. Branch: Full or Worker-only replay
   - id: run-worker-if-needed
-    type: io.kestra.plugin.scripts.shell.Commands
+    type: io.kestra.plugin.scripts.python.Script
     description: "Run worker if replay_type is full or worker_only"
     disabled: "{{ inputs.replay_type == 'notifier_only' }}"
     outputFiles:
       - worker_response.json
     beforeCommands:
       - cd {{ globals.roadmap_design_skill_path | default('C:/Users/ryo-n/Codex_dev/Roadmap-Design-Skill') }}
-    commands:
-      - |
-        # Build worker request from replay data
-        echo "Worker replay for task {{ outputs.create-replay-task.outputFiles['new_task.json'] | json(data='new_task_id') }}"
-        # In production, this would call the actual worker
-        # For now, create a placeholder response
-        echo '{"run": {"status": "completed"}, "roadmap": {"phases": []}}' > {{ outputDir }}/worker_response.json
+    script: |
+      import json
+      import subprocess
+      import sys
+
+      # Run the Roadmap Design Skill worker
+      cmd = [
+          sys.executable, "-m", "wrappers.cli.main", "run", "--no-llm",
+          "-i", "{{ outputDir }}/worker_request.json",
+          "-o", "{{ outputDir }}/worker_response.json"
+      ]
+
+      result = subprocess.run(cmd, capture_output=True, text=True)
+
+      if result.returncode != 0:
+          # Worker failed - create error response
+          error_response = {
+              "schema_version": "1.0.0",
+              "run": {
+                  "run_id": "replay-error",
+                  "mode": "roadmap",
+                  "status": "failed",
+                  "created_at": "",
+                  "updated_at": "",
+                  "planner_version": "1.0.0",
+                  "response_language": "ja"
+              },
+              "error": result.stderr or result.stdout
+          }
+          with open("{{ outputDir }}/worker_response.json", "w") as f:
+              json.dump(error_response, f, indent=2)
+          print(f"Worker failed: {result.stderr}")
+      else:
+          print("Worker completed successfully")
 
   # 3b. Branch: Extract reply (if worker ran)
   - id: extract-reply-if-needed
@@ -155,13 +234,32 @@ tasks:
       with open("{{ outputDir }}/worker_response.json") as f:
           response = json.load(f)
 
-      if response.get("run", {}).get("status") == "completed":
-          reply_text = "再実行が完了しました。"
+      run_status = response.get("run", {}).get("status", "failed")
+
+      if run_status == "completed":
+          # Extract meaningful reply from roadmap response
+          phases = response.get("roadmap", [])
+          phase_count = len(phases)
+
+          if phase_count > 0:
+              # Summarize the roadmap
+              phase_titles = [p.get("title", "Unnamed") for p in phases[:3]]
+              summary = "、".join(phase_titles)
+              if phase_count > 3:
+                  summary += f" 他{phase_count - 3}フェーズ"
+              reply_text = f"再実行完了。ロードマップ: {summary}"
+          else:
+              reply_text = "再実行が完了しました。"
+      elif run_status == "partial":
+          reply_text = "再実行が部分的に完了しました。詳細を確認してください。"
       else:
-          reply_text = "再実行中にエラーが発生しました。"
+          error_msg = response.get("error", "不明なエラー")
+          reply_text = f"再実行中にエラーが発生しました: {error_msg}"
 
       with open("{{ outputDir }}/reply_text.txt", "w", encoding="utf-8") as f:
           f.write(reply_text)
+
+      print(f"Reply text: {reply_text}")
 
   # 4. Post reply to Misskey
   - id: post-reply
