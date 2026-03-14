@@ -84,25 +84,27 @@ tasks:
 
   # 3. Update taskstate
   - id: update-taskstate
-    type: io.kestra.plugin.scripts.shell.Commands
+    type: io.kestra.plugin.scripts.python.Script
     description: "Update reply_state and retry_count"
-    commands:
-      - |
-        CLI_PATH="{{ globals.taskstate_cli_path | default('C:/Users/ryo-n/Codex_dev/agent-taskstate/docs/src/agent-taskstate_cli.py') }}"
-        DB_PATH="{{ globals.taskstate_db | default('C:/Users/ryo-n/.agent-taskstate/agent-taskstate.db') }}"
-        TASK_ID="{{ trigger.body.task_id }}"
+    script: |
+      import json
+      import subprocess
+      import sys
 
-        # Update reply_state to sent
-        python "$CLI_PATH" --db "$DB_PATH" task update \
-          --task "$TASK_ID" \
-          --set "reply_state=sent"
+      CLI_PATH = "{{ globals.taskstate_cli_path | default('C:/Users/ryo-n/Codex_dev/agent-taskstate/docs/src/agent-taskstate_cli.py') }}"
+      DB_PATH = "{{ globals.taskstate_db | default('C:/Users/ryo-n/.agent-taskstate/agent-taskstate.db') }}"
+      TASK_ID = "{{ trigger.body.task_id }}"
 
-        # Update updated_at timestamp
-        python "$CLI_PATH" --db "$DB_PATH" task update \
-          --task "$TASK_ID" \
-          --set "updated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      # Update reply_state to sent
+      cmd = [sys.executable, CLI_PATH, "--db", DB_PATH, "task", "update",
+             "--task", TASK_ID,
+             "--json", json.dumps({"reply_state": "sent"})]
+      result = subprocess.run(cmd, capture_output=True, text=True)
 
-        echo "Reply sent successfully for task $TASK_ID"
+      if result.returncode != 0:
+          print(json.dumps({"ok": False, "error": result.stderr}))
+      else:
+          print(f"Reply sent successfully for task {TASK_ID}")
 
   # 4. Log success
   - id: log-success
@@ -115,17 +117,18 @@ errors:
     type: io.kestra.plugin.scripts.python.Script
     script: |
       import json
-      import sys
       import subprocess
+      import sys
 
       CLI_PATH = "{{ globals.taskstate_cli_path | default('C:/Users/ryo-n/Codex_dev/agent-taskstate/docs/src/agent-taskstate_cli.py') }}"
       DB_PATH = "{{ globals.taskstate_db | default('C:/Users/ryo-n/.agent-taskstate/agent-taskstate.db') }}"
       TASK_ID = "{{ trigger.body.task_id }}"
 
-      # Update reply_state to failed and increment retry_count
-      python "$CLI_PATH" --db "$DB_PATH" task update \
-        --task "$TASK_ID" \
-        --set "reply_state=failed"
+      # Update reply_state to failed
+      cmd = [sys.executable, CLI_PATH, "--db", DB_PATH, "task", "update",
+             "--task", TASK_ID,
+             "--json", json.dumps({"reply_state": "failed"})]
+      subprocess.run(cmd, capture_output=True)
 
       print(json.dumps({
           "ok": False,

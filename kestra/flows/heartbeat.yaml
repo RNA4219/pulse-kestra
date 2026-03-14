@@ -176,12 +176,12 @@ tasks:
               response = {"error": str(e)}
               success = False
 
-          # Update taskstate
+          # Update reply_state
           new_reply_state = "sent" if success else "failed"
 
           cmd = [sys.executable, CLI_PATH, "--db", DB_PATH,
                  "task", "update", "--task", task_id,
-                 "--set", f"reply_state={new_reply_state}"]
+                 "--json", json.dumps({"reply_state": new_reply_state})]
           subprocess.run(cmd, capture_output=True)
 
           if success:
@@ -238,10 +238,70 @@ tasks:
 
       print(f"Marked {len(results)} stuck tasks for review")
 
-  # 5. Summary log
+  # 5. Trigger retry recovery for retry candidates
+  - id: trigger-retry-recovery
+    type: io.kestra.plugin.scripts.python.Script
+    description: "Trigger manual-replay for retry candidates"
+    outputFiles:
+      - retry_results.json
+    script: |
+      import json
+      import sys
+      import urllib.request
+      import urllib.error
+
+      KESTRA_API_URL = "{{ globals.kestra_api_url | default('http://localhost:8080') }}"
+      WEBHOOK_KEY = "{{ secret('PULSE_KESTRA_WEBHOOK_KEY') }}"
+
+      with open("{{ outputs.find-recovery-candidates.outputFiles['retry_candidates.json'] }}") as f:
+          retry_candidates = json.load(f)
+
+      results = []
+
+      for candidate in retry_candidates:
+          task_id = candidate["task_id"]
+
+          # Trigger manual-replay webhook
+          try:
+              payload = {
+                  "event": "manual.replay",
+                  "task_id": task_id,
+                  "replay_type": "full"
+              }
+
+              req = urllib.request.Request(
+                  f"{KESTRA_API_URL}/api/v1/executions/webhook/pulse/manual-replay/{WEBHOOK_KEY}",
+                  data=json.dumps(payload).encode("utf-8"),
+                  headers={"Content-Type": "application/json"},
+                  method="POST"
+              )
+
+              with urllib.request.urlopen(req, timeout=30) as resp:
+                  response = json.load(resp)
+                  success = True
+          except urllib.error.HTTPError as e:
+              response = {"error": str(e)}
+              success = False
+          except Exception as e:
+              response = {"error": str(e)}
+              success = False
+
+          results.append({
+              "task_id": task_id,
+              "success": success
+          })
+
+      with open("{{ outputDir }}/retry_results.json", "w") as f:
+          json.dump(results, f, indent=2)
+
+      successes = sum(1 for r in results if r["success"])
+      print(f"Retry recovery triggered: {successes}/{len(results)} successful")
+
+  # 6. Summary log
   - id: summary-log
     type: io.kestra.plugin.core.log.Log
     message: |
       Heartbeat cycle completed:
       - Resend results: {{ outputs.process-pending-replies.outputFiles['resend_results.json'] }}
       - Stuck task results: {{ outputs.process-stuck-tasks.outputFiles['stuck_results.json'] }}
+      - Retry recovery results: {{ outputs.trigger-retry-recovery.outputFiles['retry_results.json'] }}

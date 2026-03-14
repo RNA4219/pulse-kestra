@@ -150,7 +150,7 @@ class TestTaskstateGateway:
         })
         mock_result.stderr = ""
 
-        with patch.object(subprocess, "run", return_value=mock_result):
+        with patch.object(subprocess, "run", return_value=mock_result) as mock_run:
             result = gateway.create_task_for_mention(
                 trace_id="trace123",
                 note_id="note123",
@@ -160,3 +160,75 @@ class TestTaskstateGateway:
 
         assert result.success
         assert result.data["id"] == "task123"
+
+        # Verify Phase 2 fields were included in the CLI call
+        call_args = mock_run.call_args[0][0]
+        # Find the --json argument
+        json_idx = call_args.index("--json")
+        payload = json.loads(call_args[json_idx + 1])
+        assert payload["idempotency_key"] == "misskey:note123"
+        assert payload["note_id"] == "note123"
+        assert payload["trace_id"] == "trace123"
+        assert payload["reply_state"] == "pending"
+        assert payload["retry_count"] == 0
+
+    def test_find_by_idempotency_key(self, gateway):
+        """Test find_by_idempotency_key method."""
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps({
+            "ok": True,
+            "data": [{"id": "task123", "idempotency_key": "misskey:note123"}],
+        })
+        mock_result.stderr = ""
+
+        with patch.object(subprocess, "run", return_value=mock_result) as mock_run:
+            result = gateway.find_by_idempotency_key("misskey:note123")
+
+        assert result.success
+        assert result.data["id"] == "task123"
+
+        # Verify the CLI was called with correct --idempotency-key argument
+        call_args = mock_run.call_args[0][0]
+        assert "--idempotency-key" in call_args
+        assert "misskey:note123" in call_args
+
+    def test_find_by_idempotency_key_not_found(self, gateway):
+        """Test find_by_idempotency_key when task not found."""
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps({"ok": True, "data": []})
+        mock_result.stderr = ""
+
+        with patch.object(subprocess, "run", return_value=mock_result):
+            result = gateway.find_by_idempotency_key("misskey:nonexistent")
+
+        assert not result.success
+        assert "not found" in result.error.lower()
+
+    def test_update_task_with_json(self, gateway):
+        """Test update_task method uses --json flag."""
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps({
+            "ok": True,
+            "data": {"id": "task123", "reply_state": "sent"},
+        })
+        mock_result.stderr = ""
+
+        with patch.object(subprocess, "run", return_value=mock_result) as mock_run:
+            result = gateway.update_task(
+                task_id="task123",
+                fields={"reply_state": "sent", "retry_count": 1},
+            )
+
+        assert result.success
+
+        # Verify the CLI was called with --json flag
+        call_args = mock_run.call_args[0][0]
+        assert "--json" in call_args
+        # Find the --json argument and verify the payload
+        json_idx = call_args.index("--json")
+        payload = json.loads(call_args[json_idx + 1])
+        assert payload["reply_state"] == "sent"
+        assert payload["retry_count"] == 1

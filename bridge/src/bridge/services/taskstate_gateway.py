@@ -232,7 +232,7 @@ class TaskstateGateway:
         """Create a task for a Misskey mention.
 
         This is a convenience method that creates a task with sensible defaults
-        for Misskey mention handling.
+        for Misskey mention handling, including Phase 2 fields for dedupe and tracking.
 
         Args:
             trace_id: Trace ID for correlation
@@ -243,17 +243,24 @@ class TaskstateGateway:
         Returns:
             TaskstateResult with created task data
         """
-        title = f"Misskey mention: @{username or 'unknown'} - {command}"
-        goal = f"Process @pulse {command} command from note {note_id}"
+        payload: dict[str, Any] = {
+            "kind": "feature",
+            "title": f"Misskey mention: @{username or 'unknown'} - {command}",
+            "goal": f"Process @pulse {command} command from note {note_id}",
+            "status": "draft",
+            "priority": "medium",
+            "owner_type": "agent",
+            "owner_id": "pulse-bridge",
+            # Phase 2 fields
+            "idempotency_key": f"misskey:{note_id}",
+            "note_id": note_id,
+            "trace_id": trace_id,
+            "reply_state": "pending",
+            "retry_count": 0,
+        }
 
-        return self.create_task(
-            kind="feature",
-            title=title,
-            goal=goal,
-            priority="medium",
-            owner_type="agent",
-            owner_id="pulse-bridge",
-        )
+        args = ["task", "create", "--json", json.dumps(payload)]
+        return self._run_cli(args)
 
     def find_by_idempotency_key(
         self,
@@ -269,7 +276,7 @@ class TaskstateGateway:
         Returns:
             TaskstateResult with task data if found, or success=False if not found
         """
-        args = ["task", "list", "--json", json.dumps({"idempotency_key": idempotency_key})]
+        args = ["task", "list", "--idempotency-key", idempotency_key]
         result = self._run_cli(args)
 
         if result.success and result.data:
@@ -295,9 +302,7 @@ class TaskstateGateway:
         Returns:
             TaskstateResult with updated task data
         """
-        args = ["task", "update", "--task", task_id]
-        for key, value in fields.items():
-            args.extend(["--set", f"{key}={value}"])
+        args = ["task", "update", "--task", task_id, "--json", json.dumps(fields)]
         return self._run_cli(args)
 
     def increment_retry_count(

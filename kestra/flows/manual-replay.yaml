@@ -80,18 +80,28 @@ tasks:
       CLI_PATH = "{{ globals.taskstate_cli_path | default('C:/Users/ryo-n/Codex_dev/agent-taskstate/docs/src/agent-taskstate_cli.py') }}"
       DB_PATH = "{{ globals.taskstate_db | default('C:/Users/ryo-n/.agent-taskstate/agent-taskstate.db') }}"
 
-      with open("{{ outputDir }}/replay_data.json") as f:
+      with open("{{ outputs.get-original-task.outputFiles['replay_data.json'] }}") as f:
           replay_data = json.load(f)
 
       now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-      # Create new task
+      # Create new task with Phase 2 fields
+      payload = {
+          "kind": "feature",
+          "title": f"Replay of {replay_data['original_task_id']}",
+          "goal": "Manual replay execution",
+          "status": "ready",
+          "trace_id": replay_data["trace_id"],
+          "note_id": replay_data["note_id"],
+          "idempotency_key": replay_data["idempotency_key"],
+          "retry_count": replay_data["retry_count"],
+          "original_task_id": replay_data["original_task_id"],
+          "reply_target": replay_data["reply_target"],
+          "trigger": "manual.replay"
+      }
+
       cmd = [sys.executable, CLI_PATH, "--db", DB_PATH, "task", "create",
-             "--kind", "task",
-             "--title", f"Replay of {replay_data['original_task_id']}",
-             "--status", "ready",
-             "--owner-type", "agent",
-             "--owner-id", "kestra-replay"]
+             "--json", json.dumps(payload)]
 
       result = subprocess.run(cmd, capture_output=True, text=True)
 
@@ -101,19 +111,6 @@ tasks:
 
       new_task = json.loads(result.stdout)
       new_task_id = new_task.get("data", {}).get("id")
-
-      # Update with additional fields
-      update_cmd = [sys.executable, CLI_PATH, "--db", DB_PATH, "task", "update",
-                    "--task", new_task_id,
-                    "--set", f"trace_id={replay_data['trace_id']}",
-                    "--set", f"note_id={replay_data['note_id']}",
-                    "--set", f"reply_target={replay_data['reply_target']}",
-                    "--set", f"idempotency_key={replay_data['idempotency_key']}",
-                    "--set", f"retry_count={replay_data['retry_count']}",
-                    "--set", f"original_task_id={replay_data['original_task_id']}",
-                    "--set", f"trigger=manual.replay"]
-
-      subprocess.run(update_cmd, capture_output=True)
 
       output = {
           "new_task_id": new_task_id,
@@ -137,7 +134,7 @@ tasks:
       import json
       from datetime import datetime, timezone
 
-      with open("{{ outputDir }}/original_task.json") as f:
+      with open("{{ outputs.get-original-task.outputFiles['original_task.json'] }}") as f:
           original_task = json.load(f)
 
       roadmap_request = original_task.get("roadmap_request")
@@ -195,7 +192,7 @@ tasks:
       # Run the Roadmap Design Skill worker
       cmd = [
           sys.executable, "-m", "wrappers.cli.main", "run", "--no-llm",
-          "-i", "{{ outputDir }}/worker_request.json",
+          "-i", "{{ outputs.transform-request.outputFiles['worker_request.json'] }}",
           "-o", "{{ outputDir }}/worker_response.json"
       ]
 
@@ -231,7 +228,7 @@ tasks:
     script: |
       import json
 
-      with open("{{ outputDir }}/worker_response.json") as f:
+      with open("{{ outputs.run-worker-if-needed.outputFiles['worker_response.json'] }}") as f:
           response = json.load(f)
 
       run_status = response.get("run", {}).get("status", "failed")
@@ -278,23 +275,34 @@ tasks:
 
   # 5. Update new task to done
   - id: finalize-task
-    type: io.kestra.plugin.scripts.shell.Commands
-    commands:
-      - |
-        CLI_PATH="{{ globals.taskstate_cli_path | default('C:/Users/ryo-n/Codex_dev/agent-taskstate/docs/src/agent-taskstate_cli.py') }}"
-        DB_PATH="{{ globals.taskstate_db | default('C:/Users/ryo-n/.agent-taskstate/agent-taskstate.db') }}"
-        NEW_TASK_ID="{{ outputs.create-replay-task.outputFiles['new_task.json'] | json(data='new_task_id') }}"
+    type: io.kestra.plugin.scripts.python.Script
+    script: |
+      import json
+      import subprocess
+      import sys
 
-        python "$CLI_PATH" --db "$DB_PATH" task set-status \
-          --task "$NEW_TASK_ID" \
-          --to done \
-          --reason "Replay completed"
+      CLI_PATH = "{{ globals.taskstate_cli_path | default('C:/Users/ryo-n/Codex_dev/agent-taskstate/docs/src/agent-taskstate_cli.py') }}"
+      DB_PATH = "{{ globals.taskstate_db | default('C:/Users/ryo-n/.agent-taskstate/agent-taskstate.db') }}"
 
-        python "$CLI_PATH" --db "$DB_PATH" task update \
-          --task "$NEW_TASK_ID" \
-          --set "reply_state=sent"
+      with open("{{ outputs.create-replay-task.outputFiles['new_task.json'] }}") as f:
+          new_task = json.load(f)
 
-        echo "Replay task $NEW_TASK_ID finalized"
+      new_task_id = new_task["new_task_id"]
+
+      # Set status to done
+      cmd = [sys.executable, CLI_PATH, "--db", DB_PATH, "task", "set-status",
+             "--task", new_task_id,
+             "--to", "done",
+             "--reason", "Replay completed"]
+      subprocess.run(cmd, capture_output=True)
+
+      # Update reply_state to sent
+      cmd = [sys.executable, CLI_PATH, "--db", DB_PATH, "task", "update",
+             "--task", new_task_id,
+             "--json", json.dumps({"reply_state": "sent"})]
+      subprocess.run(cmd, capture_output=True)
+
+      print(f"Replay task {new_task_id} finalized")
 
   # 6. Log completion
   - id: log-completion
