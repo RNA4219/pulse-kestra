@@ -1,0 +1,14 @@
+{
+  "type": "mention",
+  "body": {
+    "note": {
+      "id": "9xyz789ghi",
+      "text": "@pulse roadmap Can you help me plan a project?",
+      "visibility": "home",
+      "user": {
+        "id": "9user456def",
+        "username": "testuser"
+      }
+    }
+  }
+}

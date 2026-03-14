@@ -1,0 +1,10 @@
+{
+  "createdNote": {
+    "id": "9newnote123xyz",
+    "text": "ロードマップを生成しました！\n\n**1. Planning & Requirements**\n  Define detailed requirements and project scope\n**2. Architecture & Design**\n  Design system architecture and database schema\n**3. Development**\n  Implement core features\n**4. Testing & QA**\n  Comprehensive testing and bug fixes\n**5. Deployment**\n  Deploy to production environment\n\n詳細なロードマップは別途ご確認ください。",
+    "createdAt": "2026-03-14T10:00:05.000Z",
+    "userId": "9bot789abc",
+    "visibility": "home",
+    "replyId": "9xyz123abc"
+  }
+}

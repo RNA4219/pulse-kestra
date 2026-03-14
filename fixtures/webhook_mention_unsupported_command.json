@@ -1,0 +1,14 @@
+{
+  "type": "mention",
+  "body": {
+    "note": {
+      "id": "9xyz111pqr",
+      "text": "@pulse unknown-command do something",
+      "visibility": "home",
+      "user": {
+        "id": "9user456def",
+        "username": "testuser"
+      }
+    }
+  }
+}

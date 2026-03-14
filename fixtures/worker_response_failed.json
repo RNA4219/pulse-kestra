@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0.0",
+  "run": {
+    "run_id": "trace_01JQ999ABC",
+    "status": "failed",
+    "started_at": "2026-03-14T10:00:00Z",
+    "completed_at": "2026-03-14T10:00:02Z",
+    "message": "Failed to generate roadmap: Invalid input parameters"
+  },
+  "error": {
+    "code": "GENERATION_FAILED",
+    "message": "Could not generate roadmap from the provided input",
+    "details": {
+      "reason": "Insufficient context to create meaningful phases"
+    }
+  }
+}

@@ -1,0 +1,202 @@
+# Kestra Flow: Misskey Mention Processing
+# Triggers Roadmap Design Skill and posts reply to Misskey
+
+id: mention
+namespace: pulse
+
+# Prevent concurrent executions for same idempotency_key
+concurrency:
+  behavior: CANCEL
+  limit: 10
+
+# Error handling
+errors:
+  - id: error-handler
+    type: io.kestra.plugin.core.execution.Fail
+    description: "Flow failed"
+
+tasks:
+  # 1. Log incoming request
+  - id: log-request
+    type: io.kestra.plugin.core.log.Log
+    message: |
+      Processing mention:
+      - task_id: {{ trigger.body.task_id }}
+      - trace_id: {{ trigger.body.trace_id }}
+      - note_id: {{ trigger.body.note_id }}
+      - command: {{ trigger.body.command }}
+
+  # 2. Transform request for Roadmap Design Skill
+  - id: transform-request
+    type: io.kestra.plugin.scripts.python.Script
+    beforeCommands:
+      - pip install pydantic
+    script: |
+      import json
+      from datetime import datetime
+      from uuid import uuid4
+
+      # Read input from trigger
+      input_data = {{ trigger.body | json }}
+      roadmap_request = input_data.get("roadmap_request", {})
+      trace_id = input_data.get("trace_id", "")
+
+      # Transform to Roadmap Design Skill format
+      goal = roadmap_request.get("goal", "")
+      context = roadmap_request.get("context")
+      constraints = roadmap_request.get("constraints", [])
+      deadline = roadmap_request.get("deadline")
+
+      problem_id = f"pb_{uuid4().hex[:12]}"
+      timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+
+      problem_statement = {
+          "problem_id": problem_id,
+          "title": goal[:100] if len(goal) > 100 else goal,
+          "statement": goal,
+          "background": context,
+          "desired_outcome": f"Complete by {deadline}" if deadline else None,
+      }
+
+      constraint_items = []
+      for i, c in enumerate(constraints):
+          constraint_items.append({
+              "constraint_id": f"co_{timestamp}_{i:03d}",
+              "category": "other",
+              "statement": c,
+              "severity": "soft",
+          })
+
+      if deadline:
+          constraint_items.append({
+              "constraint_id": f"co_{timestamp}_deadline",
+              "category": "time",
+              "statement": f"Must be completed by {deadline}",
+              "severity": "hard",
+          })
+
+      insights = [{
+          "insight_id": f"in_{timestamp}_001",
+          "statement": f"Goal: {goal}",
+          "source": "user_request",
+          "importance": "high",
+      }]
+
+      available_assets = [{
+          "asset_id": f"as_{timestamp}_001",
+          "type": "skill",
+          "name": "Roadmap Design Skill",
+          "description": "AI-powered roadmap planning capability",
+      }]
+
+      worker_request = {
+          "schema_version": "1.0.0",
+          "mode": "roadmap",
+          "problem_statement": problem_statement,
+          "insights": insights,
+          "constraints": constraint_items if constraint_items else [
+              {
+                  "constraint_id": f"co_{timestamp}_default",
+                  "category": "other",
+                  "statement": "No specific constraints provided",
+                  "severity": "soft",
+              }
+          ],
+          "available_assets": available_assets,
+          "run_id": trace_id,
+      }
+
+      # Write output
+      with open("{{ outputDir }}/worker_request.json", "w") as f:
+          json.dump(worker_request, f, indent=2)
+
+  # 3. Execute Roadmap Design Skill
+  - id: run-worker
+    type: io.kestra.plugin.scripts.shell.Commands
+    description: "Execute Roadmap Design Skill"
+    beforeCommands:
+      - cd {{ globals.roadsap_design_skill_path | default('C:/Users/ryo-n/Codex_dev/Roadmap-Design-Skill') }}
+    commands:
+      - |
+        python -m wrappers.cli.main run --no-llm \
+          -i {{ outputDir }}/worker_request.json \
+          -o {{ outputDir }}/worker_response.json
+
+  # 4. Extract reply text from response
+  - id: extract-reply
+    type: io.kestra.plugin.scripts.python.Script
+    script: |
+      import json
+
+      with open("{{ outputDir }}/worker_response.json", "r") as f:
+          response = json.load(f)
+
+      run_status = response.get("run", {}).get("status", "")
+      if run_status != "completed":
+          error_msg = response.get("run", {}).get("message", "Unknown error")
+          reply_text = f"ロードマップ生成中にエラーが発生しました: {error_msg}"
+      else:
+          roadmap = response.get("roadmap", {})
+          phases = roadmap.get("phases", [])
+
+          if not phases:
+              reply_text = "ロードマップが生成されましたが、フェーズが含まれていません。"
+          else:
+              lines = ["ロードマップを生成しました！\n"]
+              for i, phase in enumerate(phases[:5], 1):
+                  phase_title = phase.get("title", f"フェーズ {i}")
+                  phase_summary = phase.get("summary", "")
+                  lines.append(f"**{i}. {phase_title}**")
+                  if phase_summary:
+                      lines.append(f"  {phase_summary[:100]}")
+
+              if len(phases) > 5:
+                  lines.append(f"\n...他 {len(phases) - 5} フェーズ")
+
+              lines.append("\n詳細なロードマップは別途ご確認ください。")
+              reply_text = "\n".join(lines)
+
+      with open("{{ outputDir }}/reply_text.txt", "w") as f:
+          f.write(reply_text)
+
+      # Also save response for taskstate update
+      with open("{{ outputDir }}/worker_status.json", "w") as f:
+          json.dump({
+              "status": "done" if run_status == "completed" else "failed",
+              "has_phases": len(phases) > 0,
+              "phase_count": len(phases),
+          }, f)
+
+  # 5. Post reply to Misskey
+  - id: post-reply
+    type: io.kestra.plugin.scripts.http.Request
+    uri: "{{ globals.misskey_api_url | default('http://misskey:3000/api') }}/notes/create"
+    method: POST
+    headers:
+      Content-Type: application/json
+    body: |
+      {
+        "i": "{{ secret('MISSKEY_API_TOKEN') }}",
+        "replyId": "{{ trigger.body.reply_target }}",
+        "text": "{{ outputs.extract-reply.vars.reply_text }}",
+        "visibility": "home"
+      }
+
+  # 6. Update taskstate status
+  - id: update-taskstate
+    type: io.kestra.plugin.scripts.shell.Commands
+    description: "Update taskstate with final status"
+    commands:
+      - |
+        python {{ globals.taskstate_cli_path }} task set-status \
+          --task {{ trigger.body.task_id }} \
+          --to done \
+          --reason "Worker completed successfully"
+
+triggers:
+  - id: webhook-trigger
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: "{{ secret('PULSE_KESTRA_WEBHOOK_KEY') }}"
+    conditions:
+      - type: io.kestra.plugin.core.condition.ExpressionCondition
+        expression: "{{ trigger.body.event == 'misskey.mention' }}"

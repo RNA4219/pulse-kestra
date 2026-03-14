@@ -1,0 +1,14 @@
+{
+  "type": "mention",
+  "body": {
+    "note": {
+      "id": "9xyz456jkl",
+      "text": "@pulse roadmap\n```json\n{\n  \"context\": \"Missing goal field\",\n  \"deadline\": \"2026-06-01\"\n}\n```",
+      "visibility": "home",
+      "user": {
+        "id": "9user456def",
+        "username": "testuser"
+      }
+    }
+  }
+}

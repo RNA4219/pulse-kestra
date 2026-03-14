@@ -1,0 +1,19 @@
+{
+  "type": "mention",
+  "body": {
+    "note": {
+      "id": "9xyz123abc",
+      "text": "@pulse roadmap\n```json\n{\n  \"goal\": \"Build a web application for task management\",\n  \"context\": \"Small team of 5 developers, need to track tasks and deadlines\",\n  \"constraints\": [\"Must use PostgreSQL\", \"Budget is limited\"],\n  \"deadline\": \"2026-06-01\"\n}\n```",
+      "visibility": "home",
+      "user": {
+        "id": "9user456def",
+        "username": "testuser",
+        "name": "Test User"
+      }
+    },
+    "user": {
+      "id": "9user456def",
+      "username": "testuser"
+    }
+  }
+}

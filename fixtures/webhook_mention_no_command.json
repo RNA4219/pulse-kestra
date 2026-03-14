@@ -1,0 +1,14 @@
+{
+  "type": "mention",
+  "body": {
+    "note": {
+      "id": "9xyz999mno",
+      "text": "Hello @pulse! How are you today?",
+      "visibility": "home",
+      "user": {
+        "id": "9user456def",
+        "username": "testuser"
+      }
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "type": "reply",
+  "body": {
+    "note": {
+      "id": "9reply123",
+      "text": "This is a reply, not a mention",
+      "user": {
+        "id": "9user456def",
+        "username": "testuser"
+      }
+    }
+  }
+}

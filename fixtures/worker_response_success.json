@@ -1,0 +1,71 @@
+{
+  "schema_version": "1.0.0",
+  "run": {
+    "run_id": "trace_01JQ999XYZ",
+    "status": "completed",
+    "started_at": "2026-03-14T10:00:00Z",
+    "completed_at": "2026-03-14T10:00:05Z"
+  },
+  "roadmap": {
+    "title": "Web Application Development Roadmap",
+    "summary": "A comprehensive plan for building a task management web application",
+    "phases": [
+      {
+        "phase_id": "phase_001",
+        "title": "Planning & Requirements",
+        "summary": "Define detailed requirements and project scope",
+        "tasks": [
+          {"task_id": "task_001", "title": "Gather requirements from stakeholders"},
+          {"task_id": "task_002", "title": "Create user stories and acceptance criteria"}
+        ],
+        "estimated_duration": "1 week"
+      },
+      {
+        "phase_id": "phase_002",
+        "title": "Architecture & Design",
+        "summary": "Design system architecture and database schema",
+        "tasks": [
+          {"task_id": "task_003", "title": "Design database schema"},
+          {"task_id": "task_004", "title": "Create API specifications"}
+        ],
+        "estimated_duration": "2 weeks"
+      },
+      {
+        "phase_id": "phase_003",
+        "title": "Development",
+        "summary": "Implement core features",
+        "tasks": [
+          {"task_id": "task_005", "title": "Set up project structure"},
+          {"task_id": "task_006", "title": "Implement user authentication"},
+          {"task_id": "task_007", "title": "Implement task CRUD operations"}
+        ],
+        "estimated_duration": "4 weeks"
+      },
+      {
+        "phase_id": "phase_004",
+        "title": "Testing & QA",
+        "summary": "Comprehensive testing and bug fixes",
+        "tasks": [
+          {"task_id": "task_008", "title": "Write unit tests"},
+          {"task_id": "task_009", "title": "Perform integration testing"}
+        ],
+        "estimated_duration": "2 weeks"
+      },
+      {
+        "phase_id": "phase_005",
+        "title": "Deployment",
+        "summary": "Deploy to production environment",
+        "tasks": [
+          {"task_id": "task_010", "title": "Set up production environment"},
+          {"task_id": "task_011", "title": "Deploy application"}
+        ],
+        "estimated_duration": "1 week"
+      }
+    ],
+    "total_estimated_duration": "10 weeks",
+    "constraints_addressed": [
+      "PostgreSQL will be used as the database",
+      "Budget-conscious implementation approach"
+    ]
+  }
+}
