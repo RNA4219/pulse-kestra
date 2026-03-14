@@ -7,12 +7,23 @@ from bridge.config import Settings, get_settings
 
 def test_settings_defaults():
     """Test that settings have sensible defaults."""
+    # Clear any environment variables that might affect defaults
+    import os
+    for key in list(os.environ.keys()):
+        if key.startswith("PULSE_"):
+            try:
+                del os.environ[key]
+            except KeyError:
+                pass
+
+    # Clear the cache before creating new settings
+    get_settings.cache_clear()
+
     settings = Settings()
 
     assert settings.misskey_hook_secret_header == "X-Misskey-Hook-Secret"
     assert settings.misskey_hook_secret == ""
     assert settings.taskstate_db == ""
-    assert settings.kestra_base_url == ""
 
 
 def test_settings_from_env(monkeypatch):

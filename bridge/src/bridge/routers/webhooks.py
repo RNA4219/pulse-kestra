@@ -237,8 +237,47 @@ async def handle_misskey_webhook(
         },
     )
 
-    # 5. Create task in taskstate
+    # 4b. Dedupe check (Phase 2)
     gateway = TaskstateGateway(settings)
+    idempotency_key = f"misskey:{result.note_id}"
+
+    existing_task = gateway.find_by_idempotency_key(idempotency_key)
+    if existing_task.success and existing_task.data:
+        existing_status = existing_task.data.get("status", "")
+        existing_task_id = existing_task.data.get("id", "")
+
+        if existing_status == "done":
+            logger.info(
+                "Task already completed, ignoring duplicate",
+                extra={
+                    "note_id": result.note_id,
+                    "existing_task_id": existing_task_id,
+                },
+            )
+            return Response(status_code=204)
+
+        if existing_status in ("ready", "in_progress"):
+            logger.info(
+                "Task already being processed, ignoring duplicate",
+                extra={
+                    "note_id": result.note_id,
+                    "existing_task_id": existing_task_id,
+                    "existing_status": existing_status,
+                },
+            )
+            return Response(status_code=204)
+
+        # For failed/review status, allow retry
+        logger.info(
+            "Existing task in retry-able state, creating new task",
+            extra={
+                "note_id": result.note_id,
+                "existing_task_id": existing_task_id,
+                "existing_status": existing_status,
+            },
+        )
+
+    # 5. Create task in taskstate
     task_result = gateway.create_task_for_mention(
         trace_id=envelope.trace_id,
         note_id=result.note_id or "",
@@ -273,6 +312,18 @@ async def handle_misskey_webhook(
     logger.info(
         "Task created",
         extra={"trace_id": envelope.trace_id, "task_id": task_id},
+    )
+
+    # 5b. Update task with Phase 2 fields
+    gateway.update_task(
+        task_id=task_id,
+        fields={
+            "idempotency_key": idempotency_key,
+            "note_id": result.note_id or "",
+            "reply_target": result.note_id or "",
+            "reply_state": "pending",
+            "trace_id": envelope.trace_id,
+        },
     )
 
     # 6. Put initial state
@@ -345,6 +396,22 @@ async def handle_misskey_webhook(
             "execution_id": kestra_result.execution_id,
         },
     )
+
+    # 8b. Save Kestra execution ID to taskstate (Phase 2)
+    if kestra_result.execution_id:
+        exec_id_result = gateway.save_kestra_execution_id(
+            task_id=task_id,
+            execution_id=kestra_result.execution_id,
+        )
+        if not exec_id_result.success:
+            logger.warning(
+                "Failed to save Kestra execution ID",
+                extra={
+                    "task_id": task_id,
+                    "execution_id": kestra_result.execution_id,
+                    "error": exec_id_result.error,
+                },
+            )
 
     # 9. Return success
     return JSONResponse(

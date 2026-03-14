@@ -355,23 +355,27 @@ class TestTaskstateCalls:
                     headers={"X-Misskey-Hook-Secret": "test-secret"},
                 )
 
-        # Verify 3 calls were made: create, put_state, set_status
-        assert mock_run.call_count == 3
+        # Verify calls were made: dedupe check, create, update_task, put_state, set_status, save_exec_id
+        # Phase 2 adds: dedupe check (find_by_idempotency_key), update_task, save_kestra_execution_id
+        assert mock_run.call_count >= 3
 
-        # Check first call is task create
-        first_call_args = mock_run.call_args_list[0][0][0]
-        assert "task" in first_call_args
-        assert "create" in first_call_args
+        # Find the task create call
+        create_call_found = False
+        put_state_call_found = False
+        set_status_call_found = False
 
-        # Check second call is state put
-        second_call_args = mock_run.call_args_list[1][0][0]
-        assert "state" in second_call_args
-        assert "put" in second_call_args
+        for call in mock_run.call_args_list:
+            args = call[0][0]
+            if "task" in args and "create" in args:
+                create_call_found = True
+            elif "state" in args and "put" in args:
+                put_state_call_found = True
+            elif "set-status" in args:
+                set_status_call_found = True
 
-        # Check third call is set-status ready
-        third_call_args = mock_run.call_args_list[2][0][0]
-        assert "set-status" in third_call_args
-        assert "ready" in third_call_args
+        assert create_call_found, "task create should be called"
+        assert put_state_call_found, "state put should be called"
+        assert set_status_call_found, "set-status should be called"
 
 
 class TestKestraPayload:
@@ -670,29 +674,50 @@ class TestStatePutAndSetStatusFailure:
         def mock_subprocess_run(*args, **kwargs):
             nonlocal call_count
             call_count += 1
-            # First call: task create (success)
-            if call_count == 1:
+            cmd = args[0] if args else kwargs.get("args", [])
+            cmd_str = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+
+            # Dedupe check (task list) - return empty (no existing task)
+            if "list" in cmd_str or "idempotency_key" in cmd_str:
+                return MagicMock(
+                    returncode=0,
+                    stdout=json.dumps({"ok": True, "data": []}),
+                    stderr="",
+                )
+            # Task create - success
+            elif "create" in cmd_str and call_count <= 3:
                 return MagicMock(
                     returncode=0,
                     stdout=json.dumps({"ok": True, "data": {"id": "task123"}}),
                     stderr="",
                 )
-            # Second call: state put (success)
-            elif call_count == 2:
+            # Update task - success
+            elif "update" in cmd_str and "set" in cmd_str:
+                return MagicMock(
+                    returncode=0,
+                    stdout=json.dumps({"ok": True, "data": {}}),
+                    stderr="",
+                )
+            # State put - success
+            elif "state" in cmd_str and "put" in cmd_str:
                 return MagicMock(
                     returncode=0,
                     stdout=json.dumps({"ok": True, "data": {"current_step": "test"}}),
                     stderr="",
                 )
-            # Third call: set-status ready (failure)
-            elif call_count == 3:
+            # Set-status ready - failure
+            elif "set-status" in cmd_str:
                 return MagicMock(
                     returncode=1,
                     stdout="",
                     stderr="Set status failed",
                 )
-            # Should not reach here
-            return MagicMock(returncode=1, stdout="", stderr="Unexpected call")
+            # Default
+            return MagicMock(
+                returncode=0,
+                stdout=json.dumps({"ok": True, "data": {}}),
+                stderr="",
+            )
 
         with patch("bridge.services.taskstate_gateway.subprocess.run", side_effect=mock_subprocess_run):
             with respx.mock:

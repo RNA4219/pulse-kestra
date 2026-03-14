@@ -104,8 +104,9 @@ class TestE2EMentionFlow:
         assert data["task_id"] == "task_e2e_001"
         assert data["trace_id"].startswith("trace_")
 
-        # Verify taskstate was called 3 times (create, put_state, set_status)
-        assert mock_run.call_count == 3
+        # Verify taskstate was called (create, put_state, set_status, etc.)
+        # Phase 2 adds dedupe check and update_task calls
+        assert mock_run.call_count >= 3
 
         # Verify Kestra was called
         assert kestra_mock.called

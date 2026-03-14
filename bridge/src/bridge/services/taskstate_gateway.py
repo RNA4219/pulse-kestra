@@ -254,3 +254,91 @@ class TaskstateGateway:
             owner_type="agent",
             owner_id="pulse-bridge",
         )
+
+    def find_by_idempotency_key(
+        self,
+        idempotency_key: str,
+    ) -> TaskstateResult:
+        """Find task by idempotency key.
+
+        Used for dedupe: check if a task already exists for a given note.
+
+        Args:
+            idempotency_key: The idempotency key to search for (e.g., "misskey:{note_id}")
+
+        Returns:
+            TaskstateResult with task data if found, or success=False if not found
+        """
+        args = ["task", "list", "--json", json.dumps({"idempotency_key": idempotency_key})]
+        result = self._run_cli(args)
+
+        if result.success and result.data:
+            tasks = result.data if isinstance(result.data, list) else [result.data]
+            if tasks:
+                # Return the first (and should be only) matching task
+                return TaskstateResult(success=True, data=tasks[0])
+
+        return TaskstateResult(success=False, error="Task not found")
+
+    def update_task(
+        self,
+        *,
+        task_id: str,
+        fields: dict[str, Any],
+    ) -> TaskstateResult:
+        """Update task fields.
+
+        Args:
+            task_id: Task ID
+            fields: Dictionary of fields to update (e.g., {"reply_state": "sent"})
+
+        Returns:
+            TaskstateResult with updated task data
+        """
+        args = ["task", "update", "--task", task_id]
+        for key, value in fields.items():
+            args.extend(["--set", f"{key}={value}"])
+        return self._run_cli(args)
+
+    def increment_retry_count(
+        self,
+        *,
+        task_id: str,
+    ) -> TaskstateResult:
+        """Increment retry_count for a task.
+
+        Args:
+            task_id: Task ID
+
+        Returns:
+            TaskstateResult with updated task data
+        """
+        # Get current task to read retry_count
+        show_result = self._run_cli(["task", "show", "--task", task_id])
+        if not show_result.success:
+            return show_result
+
+        current_count = show_result.data.get("retry_count", 0) if show_result.data else 0
+        new_count = current_count + 1
+
+        return self.update_task(task_id=task_id, fields={"retry_count": new_count})
+
+    def save_kestra_execution_id(
+        self,
+        *,
+        task_id: str,
+        execution_id: str,
+    ) -> TaskstateResult:
+        """Save Kestra execution ID to task.
+
+        Args:
+            task_id: Task ID
+            execution_id: Kestra execution ID
+
+        Returns:
+            TaskstateResult with updated task data
+        """
+        return self.update_task(
+            task_id=task_id,
+            fields={"kestra_execution_id": execution_id},
+        )

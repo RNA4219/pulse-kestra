@@ -267,6 +267,11 @@ tasks:
             --task "$TASK_ID" \
             --to done \
             --reason "Worker completed successfully"
+
+          # Update reply_state to sent (Phase 2)
+          python "$CLI_PATH" --db "$DB_PATH" task update \
+            --task "$TASK_ID" \
+            --set "reply_state=sent"
         else
           # Update run to failed
           python "$CLI_PATH" --db "$DB_PATH" run finish \
@@ -278,6 +283,11 @@ tasks:
             --task "$TASK_ID" \
             --to review \
             --reason "Worker failed - requires review"
+
+          # Update reply_state to failed (Phase 2)
+          python "$CLI_PATH" --db "$DB_PATH" task update \
+            --task "$TASK_ID" \
+            --set "reply_state=failed"
         fi
 
 triggers:

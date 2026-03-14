@@ -1,0 +1,222 @@
+# Kestra Flow: Manual Replay
+# Re-run worker or resend notification for a specific task
+
+id: manual-replay
+namespace: pulse
+
+# Prevent concurrent executions for same task
+concurrency:
+  behavior: CANCEL
+  limit: 1
+  key: "{{ trigger.body.task_id }}"
+
+inputs:
+  - id: replay_type
+    type: STRING
+    defaults: "full"
+    description: "Replay type: full, worker_only, notifier_only"
+
+tasks:
+  # 1. Get original task data
+  - id: get-original-task
+    type: io.kestra.plugin.scripts.python.Script
+    description: "Retrieve original task and validate replay"
+    outputFiles:
+      - original_task.json
+      - replay_data.json
+    script: |
+      import json
+      import sys
+      import subprocess
+      from datetime import datetime, timezone
+
+      CLI_PATH = "{{ globals.taskstate_cli_path | default('C:/Users/ryo-n/Codex_dev/agent-taskstate/docs/src/agent-taskstate_cli.py') }}"
+      DB_PATH = "{{ globals.taskstate_db | default('C:/Users/ryo-n/.agent-taskstate/agent-taskstate.db') }}"
+      ORIGINAL_TASK_ID = "{{ trigger.body.task_id }}"
+      REPLAY_TYPE = "{{ inputs.replay_type }}"
+
+      # Get original task
+      cmd = [sys.executable, CLI_PATH, "--db", DB_PATH, "task", "show", "--task", ORIGINAL_TASK_ID]
+      result = subprocess.run(cmd, capture_output=True, text=True)
+
+      if result.returncode != 0:
+          print(json.dumps({"ok": False, "error": "Original task not found"}))
+          sys.exit(1)
+
+      original_task = json.loads(result.stdout).get("data", {})
+
+      # Prepare replay data
+      replay_data = {
+          "original_task_id": ORIGINAL_TASK_ID,
+          "replay_type": REPLAY_TYPE,
+          "trace_id": original_task.get("trace_id", ""),
+          "note_id": original_task.get("note_id", ""),
+          "reply_target": original_task.get("reply_target", original_task.get("note_id", "")),
+          "roadmap_request": original_task.get("roadmap_request"),
+          "retry_count": original_task.get("retry_count", 0) + 1,
+          "idempotency_key": original_task.get("idempotency_key", ""),
+      }
+
+      with open("{{ outputDir }}/original_task.json", "w") as f:
+          json.dump(original_task, f, indent=2)
+
+      with open("{{ outputDir }}/replay_data.json", "w") as f:
+          json.dump(replay_data, f, indent=2)
+
+      print(json.dumps(replay_data, indent=2))
+
+  # 2. Create new task for replay
+  - id: create-replay-task
+    type: io.kestra.plugin.scripts.python.Script
+    description: "Create new task linked to original"
+    outputFiles:
+      - new_task.json
+    script: |
+      import json
+      import sys
+      import subprocess
+      from datetime import datetime, timezone
+
+      CLI_PATH = "{{ globals.taskstate_cli_path | default('C:/Users/ryo-n/Codex_dev/agent-taskstate/docs/src/agent-taskstate_cli.py') }}"
+      DB_PATH = "{{ globals.taskstate_db | default('C:/Users/ryo-n/.agent-taskstate/agent-taskstate.db') }}"
+
+      with open("{{ outputDir }}/replay_data.json") as f:
+          replay_data = json.load(f)
+
+      now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+      # Create new task
+      cmd = [sys.executable, CLI_PATH, "--db", DB_PATH, "task", "create",
+             "--kind", "task",
+             "--title", f"Replay of {replay_data['original_task_id']}",
+             "--status", "ready",
+             "--owner-type", "agent",
+             "--owner-id", "kestra-replay"]
+
+      result = subprocess.run(cmd, capture_output=True, text=True)
+
+      if result.returncode != 0:
+          print(json.dumps({"ok": False, "error": result.stderr}))
+          sys.exit(1)
+
+      new_task = json.loads(result.stdout)
+      new_task_id = new_task.get("data", {}).get("id")
+
+      # Update with additional fields
+      update_cmd = [sys.executable, CLI_PATH, "--db", DB_PATH, "task", "update",
+                    "--task", new_task_id,
+                    "--set", f"trace_id={replay_data['trace_id']}",
+                    "--set", f"note_id={replay_data['note_id']}",
+                    "--set", f"reply_target={replay_data['reply_target']}",
+                    "--set", f"idempotency_key={replay_data['idempotency_key']}",
+                    "--set", f"retry_count={replay_data['retry_count']}",
+                    "--set", f"original_task_id={replay_data['original_task_id']}",
+                    "--set", f"trigger=manual.replay"]
+
+      subprocess.run(update_cmd, capture_output=True)
+
+      output = {
+          "new_task_id": new_task_id,
+          "original_task_id": replay_data["original_task_id"],
+          "retry_count": replay_data["retry_count"]
+      }
+
+      with open("{{ outputDir }}/new_task.json", "w") as f:
+          json.dump(output, f, indent=2)
+
+      print(json.dumps(output, indent=2))
+
+  # 3a. Branch: Full or Worker-only replay
+  - id: run-worker-if-needed
+    type: io.kestra.plugin.scripts.shell.Commands
+    description: "Run worker if replay_type is full or worker_only"
+    disabled: "{{ inputs.replay_type == 'notifier_only' }}"
+    outputFiles:
+      - worker_response.json
+    beforeCommands:
+      - cd {{ globals.roadmap_design_skill_path | default('C:/Users/ryo-n/Codex_dev/Roadmap-Design-Skill') }}
+    commands:
+      - |
+        # Build worker request from replay data
+        echo "Worker replay for task {{ outputs.create-replay-task.outputFiles['new_task.json'] | json(data='new_task_id') }}"
+        # In production, this would call the actual worker
+        # For now, create a placeholder response
+        echo '{"run": {"status": "completed"}, "roadmap": {"phases": []}}' > {{ outputDir }}/worker_response.json
+
+  # 3b. Branch: Extract reply (if worker ran)
+  - id: extract-reply-if-needed
+    type: io.kestra.plugin.scripts.python.Script
+    disabled: "{{ inputs.replay_type == 'notifier_only' }}"
+    outputFiles:
+      - reply_text.txt
+    script: |
+      import json
+
+      with open("{{ outputDir }}/worker_response.json") as f:
+          response = json.load(f)
+
+      if response.get("run", {}).get("status") == "completed":
+          reply_text = "再実行が完了しました。"
+      else:
+          reply_text = "再実行中にエラーが発生しました。"
+
+      with open("{{ outputDir }}/reply_text.txt", "w", encoding="utf-8") as f:
+          f.write(reply_text)
+
+  # 4. Post reply to Misskey
+  - id: post-reply
+    type: io.kestra.plugin.scripts.http.Request
+    uri: "{{ globals.misskey_api_url | default('http://misskey:3000/api') }}/notes/create"
+    method: POST
+    headers:
+      Content-Type: application/json
+    body: |
+      {
+        "i": "{{ secret('MISSKEY_API_TOKEN') }}",
+        "replyId": "{{ outputs.get-original-task.outputFiles['replay_data.json'] | json(data='reply_target') }}",
+        "text": "{{ inputs.replay_type == 'notifier_only' ? '通知を再送しました。' : outputs.extract-reply-if-needed.outputFiles['reply_text.txt'] }}",
+        "visibility": "home"
+      }
+
+  # 5. Update new task to done
+  - id: finalize-task
+    type: io.kestra.plugin.scripts.shell.Commands
+    commands:
+      - |
+        CLI_PATH="{{ globals.taskstate_cli_path | default('C:/Users/ryo-n/Codex_dev/agent-taskstate/docs/src/agent-taskstate_cli.py') }}"
+        DB_PATH="{{ globals.taskstate_db | default('C:/Users/ryo-n/.agent-taskstate/agent-taskstate.db') }}"
+        NEW_TASK_ID="{{ outputs.create-replay-task.outputFiles['new_task.json'] | json(data='new_task_id') }}"
+
+        python "$CLI_PATH" --db "$DB_PATH" task set-status \
+          --task "$NEW_TASK_ID" \
+          --to done \
+          --reason "Replay completed"
+
+        python "$CLI_PATH" --db "$DB_PATH" task update \
+          --task "$NEW_TASK_ID" \
+          --set "reply_state=sent"
+
+        echo "Replay task $NEW_TASK_ID finalized"
+
+  # 6. Log completion
+  - id: log-completion
+    type: io.kestra.plugin.core.log.Log
+    message: |
+      Manual replay completed:
+      - Original task: {{ trigger.body.task_id }}
+      - New task: {{ outputs.create-replay-task.outputFiles['new_task.json'] | json(data='new_task_id') }}
+      - Replay type: {{ inputs.replay_type }}
+
+# Error handling
+errors:
+  - id: error-handler
+    type: io.kestra.plugin.core.execution.Fail
+    description: "Replay failed"
+
+triggers:
+  - id: webhook-trigger
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: "{{ secret('PULSE_KESTRA_WEBHOOK_KEY') }}"
+    conditions:
+      - type: io.kestra.plugin.core.condition.ExpressionCondition
+        expression: "{{ trigger.body.event == 'manual.replay' }}"

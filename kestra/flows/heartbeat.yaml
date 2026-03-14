@@ -1,0 +1,247 @@
+# Kestra Flow: Heartbeat - Task Recovery Patrol
+# Periodically checks for stuck tasks, pending replies, and retry candidates
+
+id: heartbeat
+namespace: pulse
+
+# Schedule: Run every 5 minutes
+triggers:
+  - id: schedule-trigger
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "*/5 * * * *"
+
+tasks:
+  # 1. Find candidates for recovery
+  - id: find-recovery-candidates
+    type: io.kestra.plugin.scripts.python.Script
+    outputFiles:
+      - stuck_tasks.json
+      - pending_replies.json
+      - retry_candidates.json
+    script: |
+      import json
+      import subprocess
+      import sys
+      from datetime import datetime, timezone, timedelta
+
+      # Configuration
+      CLI_PATH = "{{ globals.taskstate_cli_path | default('C:/Users/ryo-n/Codex_dev/agent-taskstate/docs/src/agent-taskstate_cli.py') }}"
+      DB_PATH = "{{ globals.taskstate_db | default('C:/Users/ryo-n/.agent-taskstate/agent-taskstate.db') }}"
+      STUCK_MINUTES = int("{{ globals.stuck_in_progress_minutes | default('15') }}")
+      PENDING_REPLY_MINUTES = int("{{ globals.stuck_pending_reply_minutes | default('10') }}")
+      MAX_RETRY_COUNT = int("{{ globals.max_retry_count | default('3') }}")
+
+      def run_cli(args):
+          """Run taskstate CLI and return JSON output."""
+          cmd = [sys.executable, CLI_PATH, "--db", DB_PATH] + args
+          result = subprocess.run(cmd, capture_output=True, text=True)
+          if result.returncode != 0:
+              return {"ok": False, "error": result.stderr}
+          return json.loads(result.stdout)
+
+      now = datetime.now(timezone.utc)
+      stuck_threshold = (now - timedelta(minutes=STUCK_MINUTES)).isoformat()
+      pending_threshold = (now - timedelta(minutes=PENDING_REPLY_MINUTES)).isoformat()
+
+      # Find stuck in_progress tasks
+      stuck_result = run_cli([
+          "task", "list",
+          "--status", "in_progress",
+          "--updated-before", stuck_threshold
+      ])
+      stuck_tasks = stuck_result.get("data", []) if stuck_result.get("ok") else []
+
+      # Find tasks with pending/failed replies
+      pending_result = run_cli([
+          "task", "list",
+          "--status", "done"
+      ])
+      done_tasks = pending_result.get("data", []) if pending_result.get("ok") else []
+
+      pending_replies = []
+      retry_candidates = []
+
+      for task in done_tasks:
+          reply_state = task.get("reply_state", "")
+          retry_count = task.get("retry_count", 0)
+          updated_at = task.get("updated_at", "")
+
+          # Check for pending/failed replies
+          if reply_state in ("pending", "failed"):
+              pending_replies.append({
+                  "task_id": task["id"],
+                  "reply_state": reply_state,
+                  "retry_count": retry_count,
+                  "note_id": task.get("note_id", ""),
+                  "reply_target": task.get("reply_target", ""),
+                  "trace_id": task.get("trace_id", ""),
+              })
+
+      # Find retry candidates (failed with retry_count < max)
+      failed_result = run_cli([
+          "task", "list",
+          "--status", "review"
+      ])
+      review_tasks = failed_result.get("data", []) if failed_result.get("ok") else []
+
+      for task in review_tasks:
+          retry_count = task.get("retry_count", 0)
+          if retry_count < MAX_RETRY_COUNT:
+              retry_candidates.append({
+                  "task_id": task["id"],
+                  "retry_count": retry_count,
+                  "trace_id": task.get("trace_id", ""),
+                  "note_id": task.get("note_id", ""),
+              })
+
+      # Write outputs
+      with open("{{ outputDir }}/stuck_tasks.json", "w") as f:
+          json.dump(stuck_tasks, f, indent=2)
+
+      with open("{{ outputDir }}/pending_replies.json", "w") as f:
+          json.dump(pending_replies, f, indent=2)
+
+      with open("{{ outputDir }}/retry_candidates.json", "w") as f:
+          json.dump(retry_candidates, f, indent=2)
+
+      print(f"Found {len(stuck_tasks)} stuck tasks")
+      print(f"Found {len(pending_replies)} pending/failed replies")
+      print(f"Found {len(retry_candidates)} retry candidates")
+
+  # 2. Log findings
+  - id: log-findings
+    type: io.kestra.plugin.core.log.Log
+    message: |
+      Heartbeat patrol completed:
+      - Stuck tasks: {{ outputs.find-recovery-candidates.outputFiles['stuck_tasks.json'] }}
+      - Pending replies: {{ outputs.find-recovery-candidates.outputFiles['pending_replies.json'] }}
+      - Retry candidates: {{ outputs.find-recovery-candidates.outputFiles['retry_candidates.json'] }}
+
+  # 3. Process pending replies (notifier resend)
+  - id: process-pending-replies
+    type: io.kestra.plugin.scripts.python.Script
+    description: "Resend failed/pending replies to Misskey"
+    outputFiles:
+      - resend_results.json
+    script: |
+      import json
+      import sys
+      import subprocess
+      import urllib.request
+      import urllib.error
+
+      CLI_PATH = "{{ globals.taskstate_cli_path | default('C:/Users/ryo-n/Codex_dev/agent-taskstate/docs/src/agent-taskstate_cli.py') }}"
+      DB_PATH = "{{ globals.taskstate_db | default('C:/Users/ryo-n/.agent-taskstate/agent-taskstate.db') }}"
+      MISSKEY_API_URL = "{{ globals.misskey_api_url | default('http://misskey:3000/api') }}"
+      MISSKEY_TOKEN = "{{ secret('MISSKEY_API_TOKEN') }}"
+
+      # Read pending replies
+      with open("{{ outputs.find-recovery-candidates.outputFiles['pending_replies.json'] }}") as f:
+          pending_replies = json.load(f)
+
+      results = []
+
+      for task in pending_replies:
+          task_id = task["task_id"]
+          note_id = task.get("note_id", "")
+          reply_target = task.get("reply_target", note_id)
+
+          # Get reply text from task context or artifact
+          # For now, use a generic recovery message
+          reply_text = "処理が完了しました。詳細は別途ご確認ください。"
+
+          # Try to post reply
+          try:
+              payload = {
+                  "i": MISSKEY_TOKEN,
+                  "replyId": reply_target,
+                  "text": reply_text,
+                  "visibility": "home"
+              }
+
+              req = urllib.request.Request(
+                  f"{MISSKEY_API_URL}/notes/create",
+                  data=json.dumps(payload).encode("utf-8"),
+                  headers={"Content-Type": "application/json"},
+                  method="POST"
+              )
+
+              with urllib.request.urlopen(req, timeout=30) as resp:
+                  response = json.load(resp)
+                  success = True
+          except urllib.error.HTTPError as e:
+              response = {"error": str(e)}
+              success = False
+          except Exception as e:
+              response = {"error": str(e)}
+              success = False
+
+          # Update taskstate
+          new_reply_state = "sent" if success else "failed"
+
+          cmd = [sys.executable, CLI_PATH, "--db", DB_PATH,
+                 "task", "update", "--task", task_id,
+                 "--set", f"reply_state={new_reply_state}"]
+          subprocess.run(cmd, capture_output=True)
+
+          if success:
+              # Increment retry_count on success too (to track attempts)
+              pass
+
+          results.append({
+              "task_id": task_id,
+              "success": success,
+              "reply_state": new_reply_state
+          })
+
+      with open("{{ outputDir }}/resend_results.json", "w") as f:
+          json.dump(results, f, indent=2)
+
+      successes = sum(1 for r in results if r["success"])
+      print(f"Resend completed: {successes}/{len(results)} successful")
+
+  # 4. Process stuck tasks - mark for review
+  - id: process-stuck-tasks
+    type: io.kestra.plugin.scripts.python.Script
+    description: "Mark stuck tasks for review"
+    outputFiles:
+      - stuck_results.json
+    script: |
+      import json
+      import sys
+      import subprocess
+
+      CLI_PATH = "{{ globals.taskstate_cli_path | default('C:/Users/ryo-n/Codex_dev/agent-taskstate/docs/src/agent-taskstate_cli.py') }}"
+      DB_PATH = "{{ globals.taskstate_db | default('C:/Users/ryo-n/.agent-taskstate/agent-taskstate.db') }}"
+
+      with open("{{ outputs.find-recovery-candidates.outputFiles['stuck_tasks.json'] }}") as f:
+          stuck_tasks = json.load(f)
+
+      results = []
+
+      for task in stuck_tasks:
+          task_id = task["id"]
+
+          # Mark as review for manual intervention
+          cmd = [sys.executable, CLI_PATH, "--db", DB_PATH,
+                 "task", "set-status", "--task", task_id,
+                 "--to", "review", "--reason", "Stuck in in_progress"]
+          result = subprocess.run(cmd, capture_output=True, text=True)
+
+          results.append({
+              "task_id": task_id,
+              "success": result.returncode == 0
+          })
+
+      with open("{{ outputDir }}/stuck_results.json", "w") as f:
+          json.dump(results, f, indent=2)
+
+      print(f"Marked {len(results)} stuck tasks for review")
+
+  # 5. Summary log
+  - id: summary-log
+    type: io.kestra.plugin.core.log.Log
+    message: |
+      Heartbeat cycle completed:
+      - Resend results: {{ outputs.process-pending-replies.outputFiles['resend_results.json'] }}
+      - Stuck task results: {{ outputs.process-stuck-tasks.outputFiles['stuck_results.json'] }}
