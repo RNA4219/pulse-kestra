@@ -678,21 +678,22 @@ class TestStatePutAndSetStatusFailure:
             cmd_str = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
 
             # Dedupe check (task list) - return empty (no existing task)
-            if "list" in cmd_str or "idempotency_key" in cmd_str:
+            if "list" in cmd_str or "idempotency-key" in cmd_str:
                 return MagicMock(
                     returncode=0,
                     stdout=json.dumps({"ok": True, "data": []}),
                     stderr="",
                 )
-            # Task create - success
-            elif "create" in cmd_str and call_count <= 3:
+            # Task create (uses --json format) - success
+            elif "create" in cmd_str:
                 return MagicMock(
                     returncode=0,
                     stdout=json.dumps({"ok": True, "data": {"id": "task123"}}),
                     stderr="",
                 )
-            # Update task - success
-            elif "update" in cmd_str and "set" in cmd_str:
+            # Update task (uses --json format) - success
+            # Note: update_task uses "task update --task ... --json ..."
+            elif "update" in cmd_str and "--json" in cmd_str:
                 return MagicMock(
                     returncode=0,
                     stdout=json.dumps({"ok": True, "data": {}}),

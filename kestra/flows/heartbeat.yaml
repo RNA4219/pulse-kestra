@@ -250,7 +250,7 @@ tasks:
       import urllib.request
       import urllib.error
 
-      KESTRA_API_URL = "{{ globals.kestra_api_url | default('http://localhost:8080') }}"
+      KESTRA_BASE_URL = "{{ globals.kestra_base_url | default('http://localhost:8080') }}"
       WEBHOOK_KEY = "{{ secret('PULSE_KESTRA_WEBHOOK_KEY') }}"
 
       with open("{{ outputs.find-recovery-candidates.outputFiles['retry_candidates.json'] }}") as f:
@@ -270,7 +270,7 @@ tasks:
               }
 
               req = urllib.request.Request(
-                  f"{KESTRA_API_URL}/api/v1/executions/webhook/pulse/manual-replay/{WEBHOOK_KEY}",
+                  f"{KESTRA_BASE_URL}/api/v1/main/executions/webhook/pulse/manual-replay/{WEBHOOK_KEY}",
                   data=json.dumps(payload).encode("utf-8"),
                   headers={"Content-Type": "application/json"},
                   method="POST"

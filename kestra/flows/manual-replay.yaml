@@ -5,10 +5,11 @@ id: manual-replay
 namespace: pulse
 
 # Prevent concurrent executions for same task
+# Use task_id if provided, otherwise trace_id
 concurrency:
   behavior: CANCEL
   limit: 1
-  key: "{{ trigger.body.task_id }}"
+  key: "{{ trigger.body.task_id | default(trigger.body.trace_id) }}"
 
 inputs:
   - id: replay_type
@@ -17,6 +18,60 @@ inputs:
     description: "Replay type: full, worker_only, notifier_only"
 
 tasks:
+  # 0. Resolve task_id from task_id or trace_id
+  - id: resolve-task-id
+    type: io.kestra.plugin.scripts.python.Script
+    description: "Resolve task_id from webhook body (task_id or trace_id)"
+    outputFiles:
+      - resolved_task_id.txt
+      - resolved_task.json
+    script: |
+      import json
+      import subprocess
+      import sys
+
+      CLI_PATH = "{{ globals.taskstate_cli_path | default('C:/Users/ryo-n/Codex_dev/agent-taskstate/docs/src/agent-taskstate_cli.py') }}"
+      DB_PATH = "{{ globals.taskstate_db | default('C:/Users/ryo-n/.agent-taskstate/agent-taskstate.db') }}"
+
+      # Get task_id or trace_id from trigger
+      TASK_ID = "{{ trigger.body.task_id }}"
+      TRACE_ID = "{{ trigger.body.trace_id }}"
+
+      resolved_task_id = None
+      original_task = None
+
+      if TASK_ID:
+          # Direct task_id provided
+          resolved_task_id = TASK_ID
+          cmd = [sys.executable, CLI_PATH, "--db", DB_PATH, "task", "show", "--task", TASK_ID]
+          result = subprocess.run(cmd, capture_output=True, text=True)
+          if result.returncode == 0:
+              original_task = json.loads(result.stdout).get("data", {})
+      elif TRACE_ID:
+          # trace_id provided - find task by trace_id
+          cmd = [sys.executable, CLI_PATH, "--db", DB_PATH, "task", "list", "--trace-id", TRACE_ID]
+          result = subprocess.run(cmd, capture_output=True, text=True)
+          if result.returncode == 0:
+              tasks = json.loads(result.stdout).get("data", [])
+              if tasks:
+                  # Use the first matching task
+                  original_task = tasks[0]
+                  resolved_task_id = original_task.get("id")
+
+      if not resolved_task_id:
+          print(json.dumps({"error": "Task not found", "trace_id": TRACE_ID, "task_id": TASK_ID}))
+          sys.exit(1)
+
+      # Save resolved task_id for concurrency key
+      with open("{{ outputDir }}/resolved_task_id.txt", "w") as f:
+          f.write(resolved_task_id)
+
+      # Save original task data
+      with open("{{ outputDir }}/resolved_task.json", "w") as f:
+          json.dump(original_task or {}, f)
+
+      print(f"Resolved task_id: {resolved_task_id}")
+
   # 1. Get original task data
   - id: get-original-task
     type: io.kestra.plugin.scripts.python.Script
@@ -32,8 +87,11 @@ tasks:
 
       CLI_PATH = "{{ globals.taskstate_cli_path | default('C:/Users/ryo-n/Codex_dev/agent-taskstate/docs/src/agent-taskstate_cli.py') }}"
       DB_PATH = "{{ globals.taskstate_db | default('C:/Users/ryo-n/.agent-taskstate/agent-taskstate.db') }}"
-      ORIGINAL_TASK_ID = "{{ trigger.body.task_id }}"
       REPLAY_TYPE = "{{ inputs.replay_type }}"
+
+      # Read resolved task_id
+      with open("{{ outputs.resolve-task-id.outputFiles['resolved_task_id.txt'] }}", "r") as f:
+          ORIGINAL_TASK_ID = f.read().strip()
 
       # Get original task
       cmd = [sys.executable, CLI_PATH, "--db", DB_PATH, "task", "show", "--task", ORIGINAL_TASK_ID]
@@ -273,9 +331,11 @@ tasks:
         "visibility": "home"
       }
 
-  # 5. Update new task to done
+  # 5. Update new task to done (following valid state transitions)
   - id: finalize-task
     type: io.kestra.plugin.scripts.python.Script
+    outputFiles:
+      - finalize_result.json
     script: |
       import json
       import subprocess
@@ -289,18 +349,45 @@ tasks:
 
       new_task_id = new_task["new_task_id"]
 
-      # Set status to done
-      cmd = [sys.executable, CLI_PATH, "--db", DB_PATH, "task", "set-status",
-             "--task", new_task_id,
-             "--to", "done",
-             "--reason", "Replay completed"]
-      subprocess.run(cmd, capture_output=True)
+      def run_cli(args):
+          cmd = [sys.executable, CLI_PATH, "--db", DB_PATH] + args
+          return subprocess.run(cmd, capture_output=True, text=True)
+
+      # Task was created with status=ready
+      # Must transition: ready -> review -> done
+
+      # Step 1: Transition to review
+      result = run_cli(["task", "set-status", "--task", new_task_id, "--to", "review",
+                        "--reason", "Replay processing completed"])
+      if result.returncode != 0:
+          print(f"Failed to transition to review: {result.stderr}")
+          sys.exit(1)
+
+      # Step 2: Set current_summary before done transition (required by agent-taskstate)
+      state_payload = {
+          "current_step": "completed",
+          "current_summary": "Replay completed successfully",
+          "done_when": [{"done": True}],
+          "constraints": [],
+          "artifact_refs": [],
+          "evidence_refs": []
+      }
+      run_cli(["state", "put", "--task", new_task_id, "--json", json.dumps(state_payload)])
+
+      # Step 3: Transition to done
+      result = run_cli(["task", "set-status", "--task", new_task_id, "--to", "done",
+                        "--reason", "Replay completed"])
+      if result.returncode != 0:
+          print(f"Failed to transition to done: {result.stderr}")
+          sys.exit(1)
 
       # Update reply_state to sent
-      cmd = [sys.executable, CLI_PATH, "--db", DB_PATH, "task", "update",
-             "--task", new_task_id,
-             "--json", json.dumps({"reply_state": "sent"})]
-      subprocess.run(cmd, capture_output=True)
+      run_cli(["task", "update", "--task", new_task_id, "--json",
+               json.dumps({"reply_state": "sent"})])
+
+      result = {"success": True, "task_id": new_task_id}
+      with open("{{ outputDir }}/finalize_result.json", "w") as f:
+          json.dump(result, f)
 
       print(f"Replay task {new_task_id} finalized")
 
@@ -309,7 +396,7 @@ tasks:
     type: io.kestra.plugin.core.log.Log
     message: |
       Manual replay completed:
-      - Original task: {{ trigger.body.task_id }}
+      - Resolved task: {{ outputs.resolve-task-id.outputFiles['resolved_task_id.txt'] }}
       - New task: {{ outputs.create-replay-task.outputFiles['new_task.json'] | json(data='new_task_id') }}
       - Replay type: {{ inputs.replay_type }}
 
