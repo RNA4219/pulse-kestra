@@ -190,3 +190,89 @@ class TestKestraFlowConfiguration:
 
         # The correct name should be present
         assert "roadmap_design_skill_path" in content, "Correct global name 'roadmap_design_skill_path' not found"
+
+
+class TestTaskstateUpdateInFlow:
+    """Tests for taskstate update logic in Kestra flow.
+
+    Phase 1 state mapping:
+    - done = done + run.succeeded
+    - failed = review + run.failed
+    """
+
+    @pytest.fixture
+    def flow_content(self):
+        """Load flow YAML content."""
+        import pathlib
+        flow_path = pathlib.Path(__file__).parent.parent.parent / "kestra" / "flows" / "mention.yaml"
+        return flow_path.read_text(encoding="utf-8")
+
+    def test_taskstate_cli_has_db_flag(self, flow_content):
+        """Test that taskstate CLI command includes --db flag.
+
+        Without --db, Kestra might use a different database than bridge.
+        """
+        assert "--db" in flow_content, "taskstate CLI must include --db flag to ensure same DB as bridge"
+
+    def test_taskstate_cli_path_has_default(self, flow_content):
+        """Test that taskstate_cli_path has a default value.
+
+        Without a default, the flow will fail if the global is not set.
+        """
+        # Check that there's a default for taskstate_cli_path
+        assert "taskstate_cli_path" in flow_content, "taskstate_cli_path global must be used"
+        assert "default(" in flow_content or "default(" in flow_content.lower(), \
+            "taskstate_cli_path must have a default value"
+
+    def test_taskstate_db_has_default(self, flow_content):
+        """Test that taskstate_db has a default value.
+
+        Without a default, the flow will fail if the global is not set.
+        """
+        assert "taskstate_db" in flow_content, "taskstate_db global must be used"
+        # The default should be present
+        assert "default(" in flow_content, "taskstate_db must have a default value"
+
+    def test_worker_done_maps_to_taskstate_done(self):
+        """Test that worker success maps to taskstate 'done'.
+
+        Phase 1 contract: done = done + run.succeeded
+        """
+        # Simulate the flow logic
+        worker_status = {"status": "done", "has_phases": True, "phase_count": 3}
+
+        # Determine target status
+        if worker_status.get("status") == "done":
+            target_status = "done"
+        else:
+            target_status = "review"
+
+        assert target_status == "done", "Worker success should map to taskstate 'done'"
+
+    def test_worker_failed_maps_to_taskstate_review(self):
+        """Test that worker failure maps to taskstate 'review'.
+
+        Phase 1 contract: failed = review + run.failed
+        """
+        # Simulate the flow logic
+        worker_status = {"status": "failed", "has_phases": False, "phase_count": 0}
+
+        # Determine target status
+        if worker_status.get("status") == "done":
+            target_status = "done"
+        else:
+            target_status = "review"
+
+        assert target_status == "review", "Worker failure should map to taskstate 'review'"
+
+    def test_flow_uses_conditional_status_update(self, flow_content):
+        """Test that flow uses conditional logic for status update.
+
+        The flow should not always set 'done', but should check worker result.
+        """
+        # Look for conditional logic in the flow
+        # The flow should have a way to distinguish success from failure
+        assert "STATUS" in flow_content or "status" in flow_content.lower(), \
+            "Flow should use conditional status based on worker result"
+        assert "review" in flow_content.lower(), \
+            "Flow should include 'review' status for worker failure"

@@ -185,16 +185,32 @@ tasks:
         "visibility": "home"
       }
 
-  # 6. Update taskstate status
+  # 6. Update taskstate status based on worker result
+  # Phase 1 state mapping:
+  # - done = done + run.succeeded
+  # - failed = review + run.failed
   - id: update-taskstate
     type: io.kestra.plugin.scripts.shell.Commands
-    description: "Update taskstate with final status"
+    description: "Update taskstate with final status based on worker result"
     commands:
       - |
-        python {{ globals.taskstate_cli_path }} task set-status \
+        WORKER_STATUS=$(cat {{ outputDir }}/worker_status.json)
+        STATUS=$(echo "$WORKER_STATUS" | python -c "import sys,json; print(json.load(sys.stdin).get('status', 'failed'))")
+
+        if [ "$STATUS" = "done" ]; then
+          TARGET_STATUS="done"
+          REASON="Worker completed successfully"
+        else
+          TARGET_STATUS="review"
+          REASON="Worker failed - requires review"
+        fi
+
+        python {{ globals.taskstate_cli_path | default('C:/Users/ryo-n/Codex_dev/agent-taskstate/docs/src/agent-taskstate_cli.py') }} \
+          --db "{{ globals.taskstate_db | default('C:/Users/ryo-n/.agent-taskstate/agent-taskstate.db') }}" \
+          task set-status \
           --task {{ trigger.body.task_id }} \
-          --to done \
-          --reason "Worker completed successfully"
+          --to "$TARGET_STATUS" \
+          --reason "$REASON"
 
 triggers:
   - id: webhook-trigger
