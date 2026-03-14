@@ -20,6 +20,7 @@ Phase 1 の bridge 実装が完了しており、Misskey webhook 受信から Ke
 - [実装準備計画](./docs/implementation-plan.md)
 - [原案メモ](./docs/requirements.txt)
 - [Phase 1 検収メモ](./docs/acceptance-note-phase1.md)
+- [Phase 1 完了リリースノート](./docs/releases/phase1.md)
 
 ## Phase 1 実装状況
 
