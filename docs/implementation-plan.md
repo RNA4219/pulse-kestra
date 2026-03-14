@@ -76,15 +76,18 @@ pulse-kestra/
 
 | 名前 | 用途 |
 |---|---|
-| `MISSKEY_WEBHOOK_SECRET` | webhook 検証 |
-| `MISSKEY_API_BASE_URL` | Misskey API 接続先 |
-| `MISSKEY_API_TOKEN` | Misskey 投稿 |
-| `KESTRA_BASE_URL` | Kestra 接続先 |
-| `KESTRA_WEBHOOK_KEY` | Kestra trigger 認証 |
-| `TASKSTATE_BASE_URL` | `agent-taskstate` 接続先 |
-| `TASKSTATE_TOKEN` | taskstate 認証 |
-| `DEFAULT_WORKER` | 初期 worker 名 |
-| `LOG_LEVEL` | ログ詳細度 |
+| `PULSE_MISSKEY_HOOK_SECRET` | webhook 検証 |
+| `PULSE_MISSKEY_HOOK_SECRET_HEADER` | webhook secret header 名 |
+| `PULSE_MISSKEY_API_BASE_URL` | Misskey API 接続先 |
+| `PULSE_MISSKEY_API_TOKEN` | Misskey 投稿 |
+| `PULSE_KESTRA_BASE_URL` | Kestra 接続先 |
+| `PULSE_KESTRA_NAMESPACE` | Kestra namespace |
+| `PULSE_KESTRA_FLOW_ID` | mention flow ID |
+| `PULSE_KESTRA_WEBHOOK_KEY` | Kestra trigger 認証 |
+| `PULSE_TASKSTATE_DB` | `agent-taskstate` DB パス |
+| `PULSE_TASKSTATE_CLI_PATH` | `agent-taskstate` CLI スクリプトパス |
+| `PULSE_DEFAULT_WORKER` | 初期 worker 名 |
+| `PULSE_LOG_LEVEL` | ログ詳細度 |
 
 ## 5. 実装順序
 
@@ -175,3 +178,49 @@ pulse-kestra/
 - Kestra 側の trigger 認証方式
 
 この 5 点が固まれば、Phase 1 の実装へすぐ入れる状態です。
+
+## 10. Phase 2 見直し
+
+Phase 1 完了後の実装状況を踏まえると、Phase 2 の主眼は bridge の新規実装ではなく、運用回復と再実行導線の整備である。`trace_id` 付与、Misskey 返信、Kestra mention flow、taskstate 起票は Phase 1 で成立しているため、Phase 2 では次を優先する。
+
+1. heartbeat flow 本体の実装
+2. retry と未通知再送の制御
+3. manual replay の整備
+4. durable dedupe と idempotency 永続化
+5. stuck task の検出と回復運用
+6. 運用手順、観測性、アラートの補強
+
+### 10.1 Phase 2 で維持する前提
+
+- 正本は引き続き `agent-taskstate` とする
+- Misskey 依存は bridge と notifier に閉じ込める
+- heartbeat は軽量に保ち、重い worker 実行は別 flow へ委譲する
+- `reply_state` `retry_count` `kestra_execution_id` を運用回復の軸にする
+- PostgreSQL などの保存先拡張は、運用上の必要が明確になってから別途判断する
+
+### 10.2 Phase 2 実装段階
+
+Phase 2 は 3 段階で実施する。
+
+#### Phase 2-1: 契約確定
+
+- `reply_state` `retry_count` `kestra_execution_id` の運用契約を確定
+- stuck 判定基準と manual replay 引継ぎ項目を定義
+- durable dedupe のキーと保存先を決定
+
+**関連ドキュメント**:
+- [phase2-state-contract.md](./phase2-state-contract.md): 状態項目と更新契約
+- [dedupe-design.md](./dedupe-design.md): 重複排除設計
+- [event-schema.md](./event-schema.md): TaskRecord スキーマ拡張
+
+#### Phase 2-2: 回復導線実装
+
+- heartbeat flow 本体
+- notifier 再送 flow
+- retry 判定ロジック
+
+#### Phase 2-3: 運用整備
+
+- manual replay flow
+- ログ・観測性補強
+- runbook 整備

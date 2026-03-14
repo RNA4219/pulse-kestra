@@ -57,12 +57,16 @@
 | `status` | string | 必須 | `queued` `running` `waiting` `needs_review` `done` `failed` `cancelled` |
 | `trigger` | string | 必須 | `misskey.mention` `heartbeat` `schedule` `manual` など |
 | `worker` | string | 任意 | 主たる worker 名 |
-| `retry_count` | integer | 必須 | 再試行回数 |
+| `retry_count` | integer | 必須 | 再試行回数（初期値 0、上限 3） |
 | `created_at` | string | 必須 | ISO8601 形式 |
 | `updated_at` | string | 必須 | ISO8601 形式 |
 | `trace_id` | string | 必須 | 対応する trace |
-| `kestra_execution_id` | string | 推奨 | Kestra 実行との紐付け |
-| `reply_state` | string | 推奨 | `pending` `sent` `failed` など通知状態 |
+| `idempotency_key` | string | 必須 | 二重起票防止用（形式: `misskey:{note_id}`） |
+| `kestra_execution_id` | string | 推奨 | Kestra 実行との紐付け（trigger 成功時に保存） |
+| `reply_state` | string | 推奨 | 通知状態（詳細は 2.4 を参照） |
+| `original_task_id` | string | 任意 | manual replay 元の task ID |
+| `note_id` | string | 条件付き | Misskey mention の元 note ID |
+| `reply_target` | string | 条件付き | Misskey 返信先 note ID |
 
 ### 2.3 例
 
@@ -76,10 +80,33 @@
   "created_at": "2026-03-14T10:00:01Z",
   "updated_at": "2026-03-14T10:00:01Z",
   "trace_id": "trace_01JQ999XYZ",
+  "idempotency_key": "misskey:9xyz123abc",
   "kestra_execution_id": "kestra_exec_12345",
-  "reply_state": "pending"
+  "reply_state": "pending",
+  "note_id": "9xyz123abc",
+  "reply_target": "9xyz123abc"
 }
 ```
+
+### 2.4 reply_state 詳細
+
+Phase 2 で導入する Misskey 投稿状態の管理値。
+
+| 値 | 説明 |
+|---|---|
+| `pending` | 初期状態。Misskey 投稿待ち |
+| `sent` | Misskey 投稿成功 |
+| `failed` | Misskey 投稿失敗（再送可能） |
+| `skipped` | 投稿スキップ（guard 拒否など） |
+
+詳細な状態遷移は [phase2-state-contract.md](./phase2-state-contract.md) を参照。
+
+### 2.5 retry_count 運用
+
+- 初期値: 0
+- インクリメント条件: worker 失敗、Misskey 投稿失敗、manual replay
+- 上限: 3（環境変数 `PULSE_MAX_RETRY_COUNT` で変更可）
+- 上限超過時: 自動 retry 停止、status を `review` へ
 
 ## 3. WorkerAdapterRequest
 

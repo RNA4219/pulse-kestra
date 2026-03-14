@@ -261,14 +261,14 @@
 - taskstate 起票
 - 1 worker 接続
 
-### 8.2 Phase 2: 運用可能化
+### 8.2 Phase 2: 運用回復と再実行の整備
 
-- heartbeat 追加
-- retry 制御
-- エラー分類
-- `trace_id` 運用
-- secrets 管理
-- PostgreSQL 永続化
+- heartbeat flow 本体の実装
+- retry 制御と未通知結果の再送制御
+- manual replay による task/run 再実行導線の整備
+- durable dedupe と idempotency 永続化
+- stuck task と通知失敗の回復運用
+- 観測性、アラート、運用手順の整備
 
 ### 8.3 Phase 3: 拡張
 
@@ -291,6 +291,14 @@ Phase 1 完了条件は以下とする。
 7. 1 つの worker が呼び出される
 8. 結果または固定文が Misskey に返信される
 9. 一連の `trace_id` をログで追跡できる
+
+Phase 2 では次を追加の完了条件とする。
+
+1. heartbeat が retry 対象、stuck task、未通知結果を定期検査できる
+2. manual replay で task ID または trace ID から再実行できる
+3. durable dedupe により同一 note の二重起票を抑止できる
+4. Misskey 投稿失敗時に未通知状態を残し、再送導線へ引き渡せる
+5. 運用手順上、taskstate と Kestra の差分を追跡して回復できる
 
 ## 10. リスク
 

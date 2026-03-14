@@ -1,0 +1,16 @@
+{
+  "task_id": "tsk_01JQ321DEF",
+  "status": "in_progress",
+  "trigger": "misskey.mention",
+  "worker": "roadmap-design-skill",
+  "retry_count": 0,
+  "created_at": "2026-03-14T09:30:00Z",
+  "updated_at": "2026-03-14T09:30:00Z",
+  "trace_id": "trace_01JQ999XYZ",
+  "idempotency_key": "misskey:9xyz123abc",
+  "kestra_execution_id": "exec_6a7b8c9d",
+  "reply_state": "pending",
+  "note_id": "9xyz123abc",
+  "reply_target": "9xyz123abc",
+  "_stuck_reason": "in_progress for > 15 minutes"
+}

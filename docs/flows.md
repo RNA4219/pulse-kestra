@@ -29,19 +29,26 @@
 
 ## 2. heartbeat フロー
 
-### 2.1 正常系
+### 2.1 目的
+
+Phase 2 の heartbeat は新しい業務処理を増やすためではなく、Phase 1 で起票済みの task/run を回復運用へつなぐために使う。主対象は `retry_count`、`reply_state`、stuck な `in_progress` task、worker 完了済みだが未通知の task とする。
+
+### 2.2 正常系
 
 1. Kestra の schedule trigger が heartbeat flow を起動する
-2. flow が `agent-taskstate` から due task、retry 対象、stuck task、未通知結果を探索する
-3. 各対象に対して再起票または通知 task を発行する
-4. 重い処理が必要なものは別 flow へ委譲する
-5. 結果を taskstate とログへ反映する
+2. flow が `agent-taskstate` から retry 対象、stuck task、未通知結果、手動回復待ち task を探索する
+3. `reply_state=pending|failed` の task は notifier 再送候補として抽出する
+4. `in_progress` のまま閾値超過した task は stuck 候補として抽出する
+5. retry 可能な task は child run または replay task を発行する
+6. 重い worker 処理が必要なものは別 flow へ委譲する
+7. 結果を taskstate、reply 状態、ログへ反映する
 
-### 2.2 制約
+### 2.3 制約
 
 - heartbeat 自体は軽量に保つ
 - worker 本体処理を heartbeat flow に直接埋め込まない
-- 巡回数よりも idempotency と異常検知を優先する
+- 巡回数よりも idempotency、未通知回復、異常検知を優先する
+- Phase 1 で導入済みの `trace_id` を利用し、heartbeat で新たな追跡子を乱立させない
 
 ## 3. manual replay フロー
 
@@ -55,8 +62,9 @@
 
 1. オペレータが task ID または trace ID を指定して再実行要求を出す
 2. bridge または Kestra manual trigger が `manual` EventEnvelope を生成する
-3. 元 task との関連を保持したまま新規 run を起票する
+3. 元 task との関連、`retry_count`、`idempotency_key` を保持したまま新規 run を起票する
 4. 指定 worker または notifier を再実行する
+5. replay 対象が通知だけの場合は worker を再実行せず reply のみ再送する
 
 ## 4. retry フロー
 
@@ -65,6 +73,7 @@
 - 一時的な HTTP 失敗や Misskey 投稿失敗は retry 候補
 - secret 不一致、入力拒否、schema 不整合は retry 不可
 - worker 固有の失敗は adapter が `failed` と `needs_review` を分ける
+- retry 判定には `retry_count`、`reply_state`、最終 run 状態を使う
 
 ### 4.2 状態遷移
 
@@ -77,7 +86,8 @@
 
 重複起票と二重返信を防ぐため、少なくとも次を実装対象とする。
 
-- webhook event ID ベースの idempotency
+- webhook event ID または `note_id` ベースの durable idempotency
 - `trace_id` 単位の関連づけ
 - Misskey reply 投稿前の未投稿確認
 - 同一 task に対する concurrent run 制御
+- manual replay 時の二重通知防止

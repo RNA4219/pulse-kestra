@@ -28,6 +28,16 @@ This directory contains sample payloads and responses for testing and developmen
 | `misskey_reply_success.json` | Successful reply post |
 | `misskey_reply_failure.json` | Failed reply (auth error) |
 
+## Task Records (Phase 2)
+
+| File | Description |
+|------|-------------|
+| `task_record_in_progress.json` | Task in progress with pending reply |
+| `task_record_done.json` | Completed task with sent reply |
+| `task_record_stuck.json` | Task stuck in in_progress > 15 minutes |
+| `task_record_reply_failed.json` | Worker done but reply failed |
+| `task_record_replay.json` | Task created by manual replay |
+
 ## Usage
 
 ### Testing Webhooks

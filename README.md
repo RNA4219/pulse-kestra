@@ -47,8 +47,9 @@ Phase 1 の bridge 実装が完了しており、Misskey webhook 受信から Ke
 
 - [ ] durable dedupe (永続的重複排除)
 - [ ] heartbeat flow 本体
+- [ ] manual replay と未通知再送導線
+- [ ] stuck task 回復を含む retry 制御
 - [ ] 複数 worker chaining
-- [ ] 高度なエラー分類・retry 制御
 
 ## ディレクトリ構成
 
