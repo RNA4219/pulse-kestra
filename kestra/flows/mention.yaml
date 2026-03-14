@@ -20,6 +20,8 @@ tasks:
   - id: start-taskstate-run
     type: io.kestra.plugin.scripts.shell.Commands
     description: "Set task to in_progress and create run with running status"
+    outputFiles:
+      - run_id.txt
     commands:
       - |
         CLI_PATH="{{ globals.taskstate_cli_path | default('C:/Users/ryo-n/Codex_dev/agent-taskstate/docs/src/agent-taskstate_cli.py') }}"
@@ -38,7 +40,8 @@ tasks:
         RUN_OUTPUT=$(python "$CLI_PATH" --db "$DB_PATH" run start \
           --task "$TASK_ID" \
           --run-type execute \
-          --actor-type agent)
+          --actor-type agent \
+          --actor-id kestra-worker)
 
         # Extract run_id from JSON output and save for later use
         echo "$RUN_OUTPUT" | python -c "import sys,json; data=json.load(sys.stdin); print(data['data']['id'])" > {{ outputDir }}/run_id.txt
@@ -56,6 +59,8 @@ tasks:
   # 2. Transform request for Roadmap Design Skill
   - id: transform-request
     type: io.kestra.plugin.scripts.python.Script
+    outputFiles:
+      - worker_request.json
     beforeCommands:
       - pip install pydantic
     script: |
@@ -141,12 +146,14 @@ tasks:
   - id: run-worker
     type: io.kestra.plugin.scripts.shell.Commands
     description: "Execute Roadmap Design Skill"
+    outputFiles:
+      - worker_response.json
     beforeCommands:
       - cd {{ globals.roadmap_design_skill_path | default('C:/Users/ryo-n/Codex_dev/Roadmap-Design-Skill') }}
     commands:
       - |
         python -m wrappers.cli.main run --no-llm \
-          -i {{ outputDir }}/worker_request.json \
+          -i {{ outputs.transform-request.outputFiles['worker_request.json'] }} \
           -o {{ outputDir }}/worker_response.json
 
   # 5. Extract reply text from response and emit as output
@@ -165,7 +172,7 @@ tasks:
 
       from kestra import Kestra
 
-      with open("{{ outputDir }}/worker_response.json", "r") as f:
+      with open("{{ outputs.run-worker.outputFiles['worker_response.json'] }}", "r") as f:
           response = json.load(f)
 
       # Initialize phases to empty list to avoid undefined reference
@@ -236,13 +243,13 @@ tasks:
     description: "Update run status and task status based on worker result"
     commands:
       - |
-        WORKER_STATUS=$(cat {{ outputDir }}/worker_status.json)
+        WORKER_STATUS=$(cat {{ outputs.extract-reply.outputFiles['worker_status.json'] }})
         STATUS=$(echo "$WORKER_STATUS" | python -c "import sys,json; print(json.load(sys.stdin).get('status', 'failed'))")
 
         CLI_PATH="{{ globals.taskstate_cli_path | default('C:/Users/ryo-n/Codex_dev/agent-taskstate/docs/src/agent-taskstate_cli.py') }}"
         DB_PATH="{{ globals.taskstate_db | default('C:/Users/ryo-n/.agent-taskstate/agent-taskstate.db') }}"
         TASK_ID="{{ trigger.body.task_id }}"
-        RUN_ID=$(cat {{ outputDir }}/run_id.txt)
+        RUN_ID=$(cat {{ outputs.start-taskstate-run.outputFiles['run_id.txt'] }})
 
         if [ "$STATUS" = "done" ]; then
           # Update run to succeeded
@@ -250,7 +257,12 @@ tasks:
             --run "$RUN_ID" \
             --status succeeded
 
-          # Update task to done
+          # Task transitions must follow in_progress -> review -> done
+          python "$CLI_PATH" --db "$DB_PATH" task set-status \
+            --task "$TASK_ID" \
+            --to review \
+            --reason "Worker completed successfully"
+
           python "$CLI_PATH" --db "$DB_PATH" task set-status \
             --task "$TASK_ID" \
             --to done \

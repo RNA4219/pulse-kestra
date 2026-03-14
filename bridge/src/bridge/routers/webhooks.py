@@ -134,46 +134,45 @@ async def handle_misskey_webhook(
                             "error": ready_result.error,
                         },
                     )
-                    # Continue anyway to log what we can
-
-                # Step 2: ready → in_progress
-                in_progress_result = gateway.set_status(
-                    task_id=task_id,
-                    status="in_progress",
-                    reason="Processing guard rejection",
-                )
-                if not in_progress_result.success:
-                    logger.error(
-                        "Failed to set guard rejection task to in_progress",
-                        extra={
-                            "task_id": task_id,
-                            "error": in_progress_result.error,
-                        },
-                    )
-
-                # Step 3: in_progress → review
-                review_result = gateway.set_status(
-                    task_id=task_id,
-                    status="review",
-                    reason=f"Guard rejected: {guard_result.reason}",
-                )
-                if review_result.success:
-                    logger.info(
-                        "Guard rejection recorded in taskstate with review status",
-                        extra={
-                            "task_id": task_id,
-                            "trace_id": envelope.trace_id,
-                            "reason": guard_result.reason,
-                        },
-                    )
                 else:
-                    logger.error(
-                        "Failed to set guard rejection task to review",
-                        extra={
-                            "task_id": task_id,
-                            "error": review_result.error,
-                        },
+                    # Step 2: ready → in_progress
+                    in_progress_result = gateway.set_status(
+                        task_id=task_id,
+                        status="in_progress",
+                        reason="Processing guard rejection",
                     )
+                    if not in_progress_result.success:
+                        logger.error(
+                            "Failed to set guard rejection task to in_progress",
+                            extra={
+                                "task_id": task_id,
+                                "error": in_progress_result.error,
+                            },
+                        )
+                    else:
+                        # Step 3: in_progress → review
+                        review_result = gateway.set_status(
+                            task_id=task_id,
+                            status="review",
+                            reason=f"Guard rejected: {guard_result.reason}",
+                        )
+                        if review_result.success:
+                            logger.info(
+                                "Guard rejection recorded in taskstate with review status",
+                                extra={
+                                    "task_id": task_id,
+                                    "trace_id": envelope.trace_id,
+                                    "reason": guard_result.reason,
+                                },
+                            )
+                        else:
+                            logger.error(
+                                "Failed to set guard rejection task to review",
+                                extra={
+                                    "task_id": task_id,
+                                    "error": review_result.error,
+                                },
+                            )
 
         raise HTTPException(status_code=400, detail=guard_result.reason)
 

@@ -19,6 +19,7 @@ Phase 1 の bridge 実装が完了しており、Misskey webhook 受信から Ke
 - [イベントとインターフェースの schema](./docs/event-schema.md)
 - [実装準備計画](./docs/implementation-plan.md)
 - [原案メモ](./docs/requirements.txt)
+- [Phase 1 検収メモ](./docs/acceptance-note-phase1.md)
 
 ## Phase 1 実装状況
 
@@ -38,7 +39,7 @@ Phase 1 の bridge 実装が完了しており、Misskey webhook 受信から Ke
 
 ### テスト状況
 
-- **112 tests passed**
+- **133 tests passed**
 - カバレッジ: 入力ガード、パーサー、ゲートウェイ、クライアント、エンドポイント
 
 ### 未実装 (Phase 2 以降)
@@ -59,7 +60,7 @@ pulse-kestra/
 │   │   ├── models/            # Pydantic モデル
 │   │   ├── services/          # ビジネスロジック (入力ガード含む)
 │   │   └── routers/           # HTTP エンドポイント
-│   ├── tests/                 # 自動テスト (112 tests)
+│   ├── tests/                 # 自動テスト (133 tests)
 │   ├── .env.example           # 環境変数テンプレート
 │   └── start.sh / start.bat   # 起動スクリプト
 ├── kestra/
