@@ -237,3 +237,33 @@ class TestTaskstateGateway:
         payload = json.loads(call_args[json_idx + 1])
         assert payload["reply_state"] == "sent"
         assert payload["retry_count"] == 1
+    def test_build_dedupe_keys(self, gateway):
+        assert gateway.build_note_dedupe_key("note123") == "misskey:note123"
+        assert gateway.build_reply_dedupe_key("task123", "note123") == "reply:task123:note123"
+        assert gateway.build_replay_dedupe_key("task123", "full", "202603150915") == "replay:task123:full:202603150915"
+
+    def test_record_duplicate_suppression(self, gateway):
+        show_result = MagicMock()
+        show_result.returncode = 0
+        show_result.stdout = json.dumps({"ok": True, "data": {"id": "task123", "duplicate_suppression_count": 2}})
+        show_result.stderr = ""
+
+        update_result = MagicMock()
+        update_result.returncode = 0
+        update_result.stdout = json.dumps({"ok": True, "data": {"id": "task123"}})
+        update_result.stderr = ""
+
+        with patch.object(subprocess, "run", side_effect=[show_result, update_result]) as mock_run:
+            result = gateway.record_duplicate_suppression(
+                task_id="task123",
+                dedupe_scope="note",
+                dedupe_key="misskey:note123",
+            )
+
+        assert result.success
+        update_call = mock_run.call_args_list[1][0][0]
+        json_idx = update_call.index("--json")
+        payload = json.loads(update_call[json_idx + 1])
+        assert payload["duplicate_suppression_count"] == 3
+        assert payload["last_duplicate_scope"] == "note"
+        assert payload["last_duplicate_key"] == "misskey:note123"

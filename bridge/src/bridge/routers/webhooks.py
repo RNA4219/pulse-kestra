@@ -240,7 +240,7 @@ async def handle_misskey_webhook(
 
     # 4b. Dedupe check (Phase 2)
     gateway = TaskstateGateway(settings)
-    idempotency_key = f"misskey:{result.note_id}"
+    idempotency_key = gateway.build_note_dedupe_key(result.note_id or "")
 
     existing_task = gateway.find_by_idempotency_key(idempotency_key)
     if existing_task.success and existing_task.data:
@@ -249,6 +249,11 @@ async def handle_misskey_webhook(
         existing_retry_count = existing_task.data.get("retry_count", 0)
 
         if existing_status == "done":
+            gateway.record_duplicate_suppression(
+                task_id=existing_task_id,
+                dedupe_scope="note",
+                dedupe_key=idempotency_key,
+            )
             logger.info(
                 "Task already completed, ignoring duplicate",
                 extra={
@@ -256,11 +261,17 @@ async def handle_misskey_webhook(
                     "existing_task_id": existing_task_id,
                     "existing_status": existing_status,
                     "retry_count": existing_retry_count,
+                    "duplicate_suppressed": True,
                 },
             )
             return Response(status_code=204)
 
         if existing_status in ("ready", "in_progress"):
+            gateway.record_duplicate_suppression(
+                task_id=existing_task_id,
+                dedupe_scope="note",
+                dedupe_key=idempotency_key,
+            )
             logger.info(
                 "Task already being processed, ignoring duplicate",
                 extra={
@@ -268,6 +279,7 @@ async def handle_misskey_webhook(
                     "existing_task_id": existing_task_id,
                     "existing_status": existing_status,
                     "retry_count": existing_retry_count,
+                    "duplicate_suppressed": True,
                 },
             )
             return Response(status_code=204)

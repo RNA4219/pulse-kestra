@@ -2,7 +2,7 @@
 
 `pulse-kestra` は、Misskey を会話・通知の表層、Kestra をイベント駆動の制御基盤として利用し、既存ワーカー OSS を疎結合で接続するための薄いオーケストレーション層です。
 
-Phase 1 の bridge 実装が完了しており、Misskey webhook 受信から Kestra flow 起動までの基盤が動作可能です。
+Phase 1 の bridge 実装に加えて、heartbeat / manual replay / notifier resend を含む Phase 2 の制御面が動作可能です。通常運転の正規チェーンは `research -> insight -> gate -> sync -> notify` を前提とし、`pulse-kestra` はその入口・再送・再実行・重複抑止を担います。
 
 ## 目的
 
@@ -43,13 +43,14 @@ Phase 1 の bridge 実装が完了しており、Misskey webhook 受信から Ke
 - **133 tests passed**
 - カバレッジ: 入力ガード、パーサー、ゲートウェイ、クライアント、エンドポイント
 
-### 未実装 (Phase 2 以降)
+### Phase 2 運転面
 
-- [ ] durable dedupe (永続的重複排除)
-- [ ] heartbeat flow 本体
-- [ ] manual replay と未通知再送導線
-- [ ] stuck task 回復を含む retry 制御
-- [ ] 複数 worker chaining
+- [x] durable dedupe の正本キー定義 (`note` / `reply` / `replay`)
+- [x] heartbeat flow 本体
+- [x] manual replay と未通知再送導線
+- [x] stuck task 回復を含む retry 制御
+- [x] `research -> insight -> gate -> sync -> notify` を崩さない制御面ドキュメント
+- [ ] 複数 worker chaining の本実装
 
 ## ディレクトリ構成
 
@@ -101,7 +102,7 @@ curl http://localhost:8000/health
 ## 想定コンポーネント
 
 - `bridge`: Misskey webhook 受信、secret 検証、入力ガード、EventEnvelope 化
-- `kestra flows`: mention、heartbeat、manual replay などの flow 定義
+- `kestra flows`: mention、heartbeat、manual replay、notifier resend などの flow 定義
 - `taskstate gateway`: `agent-taskstate` への起票と状態更新
 - `worker adapters`: 既存ワーカーの呼び出し吸収層
 - `reply notifier`: Misskey 返信と通知
@@ -113,3 +114,20 @@ curl http://localhost:8000/health
 - `insight-agent`: 洞察抽出
 - `experiment-gate`: 実験実行可否判定
 - `Roadmap-Design-Skill`: 設計支援
+
+
+## 運用上の正規チェーン
+
+`pulse-kestra` は重い worker の代わりではなく、`research -> insight -> gate -> sync -> notify` の制御面です。heartbeat は軽量巡回に限定し、必要時のみ replay / resend を起動します。
+
+## 最小観測点
+
+- 日次 run 数
+- `ok / degraded / failed` 件数
+- replay 実行件数
+- 未通知再送件数
+- notification failure 件数
+- tracker sync failure 件数
+- duplicate suppression 件数
+
+これらは taskstate の `retry_count`, `reply_state`, `duplicate_suppression_count` と Kestra flow output を集計元にします。

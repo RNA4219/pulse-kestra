@@ -1,38 +1,39 @@
 # Kestra Flow: Heartbeat - Task Recovery Patrol
-# Periodically checks for stuck tasks, pending replies, and retry candidates
+# Lightweight control-plane patrol for stuck tasks, pending replies, and retry candidates.
 
 id: heartbeat
 namespace: pulse
 
-# Schedule: Run every 5 minutes
+description: >-
+  Lightweight patrol flow. It never runs heavy workers directly; it only detects
+  recovery candidates and triggers manual-replay or notifier-resend when needed.
+
 triggers:
   - id: schedule-trigger
     type: io.kestra.plugin.core.trigger.Schedule
     cron: "*/5 * * * *"
+    timezone: "Asia/Tokyo"
 
 tasks:
-  # 1. Find candidates for recovery
   - id: find-recovery-candidates
     type: io.kestra.plugin.scripts.python.Script
     outputFiles:
       - stuck_tasks.json
       - pending_replies.json
       - retry_candidates.json
+      - heartbeat_metrics.json
     script: |
       import json
       import subprocess
       import sys
       from datetime import datetime, timezone, timedelta
 
-      # Configuration
-      CLI_PATH = "{{ globals.taskstate_cli_path | default('C:/Users/ryo-n/Codex_dev/agent-taskstate/docs/src/agent-taskstate_cli.py') }}"
-      DB_PATH = "{{ globals.taskstate_db | default('C:/Users/ryo-n/.agent-taskstate/agent-taskstate.db') }}"
+      CLI_PATH = "{{ globals.taskstate_cli_path | default('./agent-taskstate_cli.py') }}"
+      DB_PATH = "{{ globals.taskstate_db | default('./state/agent-taskstate.db') }}"
       STUCK_MINUTES = int("{{ globals.stuck_in_progress_minutes | default('15') }}")
-      PENDING_REPLY_MINUTES = int("{{ globals.stuck_pending_reply_minutes | default('10') }}")
       MAX_RETRY_COUNT = int("{{ globals.max_retry_count | default('3') }}")
 
       def run_cli(args):
-          """Run taskstate CLI and return JSON output."""
           cmd = [sys.executable, CLI_PATH, "--db", DB_PATH] + args
           result = subprocess.run(cmd, capture_output=True, text=True)
           if result.returncode != 0:
@@ -41,24 +42,13 @@ tasks:
 
       now = datetime.now(timezone.utc)
       stuck_threshold = (now - timedelta(minutes=STUCK_MINUTES)).isoformat()
-      pending_threshold = (now - timedelta(minutes=PENDING_REPLY_MINUTES)).isoformat()
-
-      # Find stuck in_progress tasks
-      stuck_result = run_cli([
-          "task", "list",
-          "--status", "in_progress",
-          "--updated-before", stuck_threshold
-      ])
+      stuck_result = run_cli(["task", "list", "--status", "in_progress", "--updated-before", stuck_threshold])
       stuck_tasks = stuck_result.get("data", []) if stuck_result.get("ok") else []
 
-      # Find tasks with pending/failed replies using Phase 2 filters
       pending_replies = []
-      retry_candidates = []
+      failed_reply_count = 0
       for reply_state in ("pending", "failed"):
-          pending_result = run_cli([
-              "task", "list",
-              "--reply-state", reply_state
-          ])
+          pending_result = run_cli(["task", "list", "--reply-state", reply_state])
           tasks = pending_result.get("data", []) if pending_result.get("ok") else []
           for task in tasks:
               pending_replies.append({
@@ -69,15 +59,14 @@ tasks:
                   "reply_target": task.get("reply_target", ""),
                   "trace_id": task.get("trace_id", ""),
                   "reply_text": task.get("reply_text", ""),
+                  "duplicate_suppression_count": task.get("duplicate_suppression_count", 0)
               })
+          if reply_state == "failed":
+              failed_reply_count += len(tasks)
 
-      # Find retry candidates (failed with retry_count < max)
-      failed_result = run_cli([
-          "task", "list",
-          "--status", "review"
-      ])
-      review_tasks = failed_result.get("data", []) if failed_result.get("ok") else []
-
+      review_result = run_cli(["task", "list", "--status", "review"])
+      review_tasks = review_result.get("data", []) if review_result.get("ok") else []
+      retry_candidates = []
       for task in review_tasks:
           retry_count = task.get("retry_count", 0)
           if retry_count < MAX_RETRY_COUNT:
@@ -86,35 +75,31 @@ tasks:
                   "retry_count": retry_count,
                   "trace_id": task.get("trace_id", ""),
                   "note_id": task.get("note_id", ""),
+                  "original_task_id": task.get("original_task_id", "")
               })
 
-      # Write outputs
-      with open("{{ outputDir }}/stuck_tasks.json", "w") as f:
-          json.dump(stuck_tasks, f, indent=2)
+      metrics = {
+          "heartbeat_time": now.isoformat(),
+          "stuck_task_count": len(stuck_tasks),
+          "pending_reply_count": len(pending_replies),
+          "retry_candidate_count": len(retry_candidates),
+          "notification_failure_count": failed_reply_count,
+          "duplicate_suppression_count": sum(item.get("duplicate_suppression_count", 0) for item in pending_replies)
+      }
 
-      with open("{{ outputDir }}/pending_replies.json", "w") as f:
-          json.dump(pending_replies, f, indent=2)
+      for name, payload in (
+          ("stuck_tasks.json", stuck_tasks),
+          ("pending_replies.json", pending_replies),
+          ("retry_candidates.json", retry_candidates),
+          ("heartbeat_metrics.json", metrics)
+      ):
+          with open(f"{{ outputDir }}/{name}", "w", encoding="utf-8") as f:
+              json.dump(payload, f, ensure_ascii=False, indent=2)
 
-      with open("{{ outputDir }}/retry_candidates.json", "w") as f:
-          json.dump(retry_candidates, f, indent=2)
+      print(json.dumps(metrics, ensure_ascii=False, indent=2))
 
-      print(f"Found {len(stuck_tasks)} stuck tasks")
-      print(f"Found {len(pending_replies)} pending/failed replies")
-      print(f"Found {len(retry_candidates)} retry candidates")
-
-  # 2. Log findings
-  - id: log-findings
-    type: io.kestra.plugin.core.log.Log
-    message: |
-      Heartbeat patrol completed:
-      - Stuck tasks: {{ outputs.find-recovery-candidates.outputFiles['stuck_tasks.json'] }}
-      - Pending replies: {{ outputs.find-recovery-candidates.outputFiles['pending_replies.json'] }}
-      - Retry candidates: {{ outputs.find-recovery-candidates.outputFiles['retry_candidates.json'] }}
-
-  # 3. Process pending replies (trigger notifier-resend flow)
   - id: process-pending-replies
     type: io.kestra.plugin.scripts.python.Script
-    description: "Trigger notifier-resend for failed/pending replies"
     outputFiles:
       - resend_results.json
     script: |
@@ -125,146 +110,146 @@ tasks:
       KESTRA_BASE_URL = "{{ globals.kestra_base_url | default('http://localhost:8080') }}"
       WEBHOOK_KEY = "{{ secret('PULSE_KESTRA_WEBHOOK_KEY') }}"
 
-      with open("{{ outputs.find-recovery-candidates.outputFiles['pending_replies.json'] }}") as f:
+      with open("{{ outputs.find-recovery-candidates.outputFiles['pending_replies.json'] }}", encoding="utf-8") as f:
           pending_replies = json.load(f)
 
       results = []
-
       for task in pending_replies:
-          task_id = task["task_id"]
+          payload = {
+              "event": "notifier.resend",
+              "task_id": task["task_id"]
+          }
           try:
-              payload = {
-                  "event": "notifier.resend",
-                  "task_id": task_id,
-              }
-              req = urllib.request.Request(
+              request = urllib.request.Request(
                   f"{KESTRA_BASE_URL}/api/v1/main/executions/webhook/pulse/notifier-resend/{WEBHOOK_KEY}",
                   data=json.dumps(payload).encode("utf-8"),
                   headers={"Content-Type": "application/json"},
                   method="POST"
               )
-              with urllib.request.urlopen(req, timeout=30):
+              with urllib.request.urlopen(request, timeout=30):
                   success = True
-          except urllib.error.HTTPError as e:
+                  error = None
+          except urllib.error.HTTPError as exc:
               success = False
-              error = str(e)
-          except Exception as e:
+              error = str(exc)
+          except Exception as exc:
               success = False
-              error = str(e)
+              error = str(exc)
 
-          result = {"task_id": task_id, "success": success}
-          if not success:
-              result["error"] = error
-          results.append(result)
+          results.append({
+              "task_id": task["task_id"],
+              "success": success,
+              "error": error,
+              "reply_state": task.get("reply_state", "pending")
+          })
 
-      with open("{{ outputDir }}/resend_results.json", "w") as f:
-          json.dump(results, f, indent=2)
+      with open("{{ outputDir }}/resend_results.json", "w", encoding="utf-8") as f:
+          json.dump(results, f, ensure_ascii=False, indent=2)
 
-      successes = sum(1 for r in results if r["success"])
-      print(f"Resend triggers completed: {successes}/{len(results)} successful")
+      print(json.dumps({
+          "resend_execution_count": len(results),
+          "resend_success_count": sum(1 for item in results if item["success"])
+      }, ensure_ascii=False, indent=2))
 
-  # 4. Process stuck tasks - mark for review
   - id: process-stuck-tasks
     type: io.kestra.plugin.scripts.python.Script
-    description: "Mark stuck tasks for review"
     outputFiles:
       - stuck_results.json
     script: |
       import json
-      import sys
       import subprocess
+      import sys
 
-      CLI_PATH = "{{ globals.taskstate_cli_path | default('C:/Users/ryo-n/Codex_dev/agent-taskstate/docs/src/agent-taskstate_cli.py') }}"
-      DB_PATH = "{{ globals.taskstate_db | default('C:/Users/ryo-n/.agent-taskstate/agent-taskstate.db') }}"
+      CLI_PATH = "{{ globals.taskstate_cli_path | default('./agent-taskstate_cli.py') }}"
+      DB_PATH = "{{ globals.taskstate_db | default('./state/agent-taskstate.db') }}"
 
-      with open("{{ outputs.find-recovery-candidates.outputFiles['stuck_tasks.json'] }}") as f:
+      with open("{{ outputs.find-recovery-candidates.outputFiles['stuck_tasks.json'] }}", encoding="utf-8") as f:
           stuck_tasks = json.load(f)
 
       results = []
-
       for task in stuck_tasks:
           task_id = task["id"]
-
-          # Mark as review for manual intervention
-          cmd = [sys.executable, CLI_PATH, "--db", DB_PATH,
-                 "task", "set-status", "--task", task_id,
-                 "--to", "review", "--reason", "Stuck in in_progress"]
+          cmd = [
+              sys.executable,
+              CLI_PATH,
+              "--db",
+              DB_PATH,
+              "task",
+              "set-status",
+              "--task",
+              task_id,
+              "--to",
+              "review",
+              "--reason",
+              "Stuck in in_progress"
+          ]
           result = subprocess.run(cmd, capture_output=True, text=True)
+          results.append({"task_id": task_id, "success": result.returncode == 0})
 
-          results.append({
-              "task_id": task_id,
-              "success": result.returncode == 0
-          })
+      with open("{{ outputDir }}/stuck_results.json", "w", encoding="utf-8") as f:
+          json.dump(results, f, ensure_ascii=False, indent=2)
 
-      with open("{{ outputDir }}/stuck_results.json", "w") as f:
-          json.dump(results, f, indent=2)
+      print(json.dumps({"review_mark_count": len(results)}, ensure_ascii=False, indent=2))
 
-      print(f"Marked {len(results)} stuck tasks for review")
-
-  # 5. Trigger retry recovery for retry candidates
   - id: trigger-retry-recovery
     type: io.kestra.plugin.scripts.python.Script
-    description: "Trigger manual-replay for retry candidates"
     outputFiles:
       - retry_results.json
     script: |
       import json
-      import sys
       import urllib.request
       import urllib.error
 
       KESTRA_BASE_URL = "{{ globals.kestra_base_url | default('http://localhost:8080') }}"
       WEBHOOK_KEY = "{{ secret('PULSE_KESTRA_WEBHOOK_KEY') }}"
 
-      with open("{{ outputs.find-recovery-candidates.outputFiles['retry_candidates.json'] }}") as f:
+      with open("{{ outputs.find-recovery-candidates.outputFiles['retry_candidates.json'] }}", encoding="utf-8") as f:
           retry_candidates = json.load(f)
 
       results = []
-
       for candidate in retry_candidates:
-          task_id = candidate["task_id"]
-
-          # Trigger manual-replay webhook
+          payload = {
+              "event": "manual.replay",
+              "task_id": candidate["task_id"],
+              "trace_id": candidate.get("trace_id", ""),
+              "replay_type": "full"
+          }
           try:
-              payload = {
-                  "event": "manual.replay",
-                  "task_id": task_id,
-                  "replay_type": "full"
-              }
-
-              req = urllib.request.Request(
+              request = urllib.request.Request(
                   f"{KESTRA_BASE_URL}/api/v1/main/executions/webhook/pulse/manual-replay/{WEBHOOK_KEY}",
                   data=json.dumps(payload).encode("utf-8"),
                   headers={"Content-Type": "application/json"},
                   method="POST"
               )
-
-              with urllib.request.urlopen(req, timeout=30) as resp:
-                  response = json.load(resp)
+              with urllib.request.urlopen(request, timeout=30):
                   success = True
-          except urllib.error.HTTPError as e:
-              response = {"error": str(e)}
+                  error = None
+          except urllib.error.HTTPError as exc:
               success = False
-          except Exception as e:
-              response = {"error": str(e)}
+              error = str(exc)
+          except Exception as exc:
               success = False
+              error = str(exc)
 
           results.append({
-              "task_id": task_id,
-              "success": success
+              "task_id": candidate["task_id"],
+              "success": success,
+              "error": error
           })
 
-      with open("{{ outputDir }}/retry_results.json", "w") as f:
-          json.dump(results, f, indent=2)
+      with open("{{ outputDir }}/retry_results.json", "w", encoding="utf-8") as f:
+          json.dump(results, f, ensure_ascii=False, indent=2)
 
-      successes = sum(1 for r in results if r["success"])
-      print(f"Retry recovery triggered: {successes}/{len(results)} successful")
+      print(json.dumps({
+          "replay_execution_count": len(results),
+          "replay_success_count": sum(1 for item in results if item["success"])
+      }, ensure_ascii=False, indent=2))
 
-  # 6. Summary log
   - id: summary-log
     type: io.kestra.plugin.core.log.Log
     message: |
-      Heartbeat cycle completed:
-      - Resend results: {{ outputs.process-pending-replies.outputFiles['resend_results.json'] }}
-      - Stuck task results: {{ outputs.process-stuck-tasks.outputFiles['stuck_results.json'] }}
-      - Retry recovery results: {{ outputs.trigger-retry-recovery.outputFiles['retry_results.json'] }}
+      Heartbeat cycle completed.
+      metrics={{ outputs.find-recovery-candidates.outputFiles['heartbeat_metrics.json'] }}
+      resend={{ outputs.process-pending-replies.outputFiles['resend_results.json'] }}
+      stuck={{ outputs.process-stuck-tasks.outputFiles['stuck_results.json'] }}
+      replay={{ outputs.trigger-retry-recovery.outputFiles['retry_results.json'] }}

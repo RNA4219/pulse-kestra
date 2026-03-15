@@ -67,6 +67,11 @@
 | `original_task_id` | string | 任意 | manual replay 元の task ID |
 | `note_id` | string | 条件付き | Misskey mention の元 note ID |
 | `reply_target` | string | 条件付き | Misskey 返信先 note ID |
+| `reply_text` | string | 推奨 | 再送や replay で再利用する返信本文 |
+| `roadmap_request_json` | string | 推奨 | replay 用に保持する worker 入力 JSON |
+| `duplicate_suppression_count` | integer | 推奨 | note / reply / replay の重複抑止回数 |
+| `last_duplicate_scope` | string | 推奨 | `note` `reply` `replay` のどれを抑止したか |
+| `last_duplicate_key` | string | 推奨 | 最後に抑止した dedupe key |
 
 ### 2.3 例
 
@@ -190,3 +195,12 @@ CLI、HTTP API、script など実行手段が違っても共通 contract で wor
 - field 名は Phase 1 で固定し、Phase 2 以降の追加は後方互換を意識する
 - `payload` の生データを抱え込みすぎず、必要最小限へ正規化する
 - `trace_id` は request、log、taskstate、reply の全経路に必ず通す
+
+
+## 7. Dedupe Key 契約
+
+- note 起票: `misskey:{note_id}`
+- reply 送信: `reply:{task_id}:{reply_target}`
+- replay 実行: `replay:{original_task_id}:{replay_type}:{bucket}`
+
+これらの key は flow、bridge、runbook で同じ名前を使う。

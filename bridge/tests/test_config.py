@@ -51,7 +51,7 @@ def test_kestra_webhook_url():
 
 def test_has_basic_auth():
     """Test Basic Auth detection."""
-    settings = Settings()
+    settings = Settings(kestra_basic_user="", kestra_basic_pass="")
     assert not settings.has_basic_auth()
 
     settings = Settings(kestra_basic_user="user", kestra_basic_pass="")

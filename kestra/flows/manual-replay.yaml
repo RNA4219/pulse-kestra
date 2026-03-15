@@ -1,11 +1,13 @@
 # Kestra Flow: Manual Replay
-# Re-run worker or resend notification for a specific task
+# Re-run worker or resend notification for a specific task.
 
 id: manual-replay
 namespace: pulse
 
-# Prevent concurrent executions for same task
-# Use task_id if provided, otherwise trace_id
+description: >-
+  Manual replay entrypoint. Resolves task_id or trace_id, suppresses short-window
+  duplicate replay requests, and can resume from worker or notifier stages.
+
 concurrency:
   behavior: CANCEL
   limit: 1
@@ -18,10 +20,8 @@ inputs:
     description: "Replay type: full, worker_only, notifier_only"
 
 tasks:
-  # 0. Resolve task_id from task_id or trace_id
   - id: resolve-task-id
     type: io.kestra.plugin.scripts.python.Script
-    description: "Resolve task_id from webhook body (task_id or trace_id)"
     outputFiles:
       - resolved_task_id.txt
       - resolved_task.json
@@ -30,82 +30,64 @@ tasks:
       import subprocess
       import sys
 
-      CLI_PATH = "{{ globals.taskstate_cli_path | default('C:/Users/ryo-n/Codex_dev/agent-taskstate/docs/src/agent-taskstate_cli.py') }}"
-      DB_PATH = "{{ globals.taskstate_db | default('C:/Users/ryo-n/.agent-taskstate/agent-taskstate.db') }}"
-
-      # Get task_id or trace_id from trigger
+      CLI_PATH = "{{ globals.taskstate_cli_path | default('./agent-taskstate_cli.py') }}"
+      DB_PATH = "{{ globals.taskstate_db | default('./state/agent-taskstate.db') }}"
       TASK_ID = "{{ trigger.body.task_id }}"
       TRACE_ID = "{{ trigger.body.trace_id }}"
 
       resolved_task_id = None
       original_task = None
-
       if TASK_ID:
-          # Direct task_id provided
           resolved_task_id = TASK_ID
           cmd = [sys.executable, CLI_PATH, "--db", DB_PATH, "task", "show", "--task", TASK_ID]
           result = subprocess.run(cmd, capture_output=True, text=True)
           if result.returncode == 0:
               original_task = json.loads(result.stdout).get("data", {})
       elif TRACE_ID:
-          # trace_id provided - find task by trace_id
           cmd = [sys.executable, CLI_PATH, "--db", DB_PATH, "task", "list", "--trace-id", TRACE_ID]
           result = subprocess.run(cmd, capture_output=True, text=True)
           if result.returncode == 0:
               tasks = json.loads(result.stdout).get("data", [])
               if tasks:
-                  # Use the first matching task
                   original_task = tasks[0]
                   resolved_task_id = original_task.get("id")
 
       if not resolved_task_id:
-          print(json.dumps({"error": "Task not found", "trace_id": TRACE_ID, "task_id": TASK_ID}))
           sys.exit(1)
 
-      # Save resolved task_id for concurrency key
-      with open("{{ outputDir }}/resolved_task_id.txt", "w") as f:
+      with open("{{ outputDir }}/resolved_task_id.txt", "w", encoding="utf-8") as f:
           f.write(resolved_task_id)
+      with open("{{ outputDir }}/resolved_task.json", "w", encoding="utf-8") as f:
+          json.dump(original_task or {}, f, ensure_ascii=False, indent=2)
 
-      # Save original task data
-      with open("{{ outputDir }}/resolved_task.json", "w") as f:
-          json.dump(original_task or {}, f)
-
-      print(f"Resolved task_id: {resolved_task_id}")
-
-  # 1. Get original task data
   - id: get-original-task
     type: io.kestra.plugin.scripts.python.Script
-    description: "Retrieve original task and validate replay"
     outputFiles:
       - original_task.json
       - replay_data.json
     script: |
       import json
-      import sys
       import subprocess
+      import sys
       from datetime import datetime, timezone
 
-      CLI_PATH = "{{ globals.taskstate_cli_path | default('C:/Users/ryo-n/Codex_dev/agent-taskstate/docs/src/agent-taskstate_cli.py') }}"
-      DB_PATH = "{{ globals.taskstate_db | default('C:/Users/ryo-n/.agent-taskstate/agent-taskstate.db') }}"
+      CLI_PATH = "{{ globals.taskstate_cli_path | default('./agent-taskstate_cli.py') }}"
+      DB_PATH = "{{ globals.taskstate_db | default('./state/agent-taskstate.db') }}"
       REPLAY_TYPE = "{{ inputs.replay_type }}"
 
-      # Read resolved task_id
-      with open("{{ outputs.resolve-task-id.outputFiles['resolved_task_id.txt'] }}", "r") as f:
+      with open("{{ outputs.resolve-task-id.outputFiles['resolved_task_id.txt'] }}", encoding="utf-8") as f:
           ORIGINAL_TASK_ID = f.read().strip()
 
-      # Get original task
       cmd = [sys.executable, CLI_PATH, "--db", DB_PATH, "task", "show", "--task", ORIGINAL_TASK_ID]
       result = subprocess.run(cmd, capture_output=True, text=True)
-
       if result.returncode != 0:
-          print(json.dumps({"ok": False, "error": "Original task not found"}))
           sys.exit(1)
 
       original_task = json.loads(result.stdout).get("data", {})
-
-      # Prepare replay data
+      replay_bucket = datetime.now(timezone.utc).strftime("%Y%m%d%H%M")
+      replay_dedupe_key = f"replay:{ORIGINAL_TASK_ID}:{REPLAY_TYPE}:{replay_bucket}"
+      roadmap_request_json = original_task.get("roadmap_request_json") or ""
       roadmap_request = None
-      roadmap_request_json = original_task.get("roadmap_request_json")
       if roadmap_request_json:
           try:
               roadmap_request = json.loads(roadmap_request_json)
@@ -120,176 +102,158 @@ tasks:
           "reply_target": original_task.get("reply_target", original_task.get("note_id", "")),
           "reply_text": original_task.get("reply_text", "処理が完了しました。詳細は別途ご確認ください。"),
           "roadmap_request": roadmap_request,
+          "roadmap_request_json": roadmap_request_json,
           "retry_count": original_task.get("retry_count", 0) + 1,
           "idempotency_key": original_task.get("idempotency_key", ""),
+          "replay_dedupe_key": replay_dedupe_key,
+          "reply_dedupe_key": f"reply:{ORIGINAL_TASK_ID}:{original_task.get('reply_target', original_task.get('note_id', ''))}",
+          "duplicate_suppressed": original_task.get("last_replay_dedupe_key") == replay_dedupe_key
       }
 
-      with open("{{ outputDir }}/original_task.json", "w") as f:
-          json.dump(original_task, f, indent=2)
+      with open("{{ outputDir }}/original_task.json", "w", encoding="utf-8") as f:
+          json.dump(original_task, f, ensure_ascii=False, indent=2)
+      with open("{{ outputDir }}/replay_data.json", "w", encoding="utf-8") as f:
+          json.dump(replay_data, f, ensure_ascii=False, indent=2)
 
-      with open("{{ outputDir }}/replay_data.json", "w") as f:
-          json.dump(replay_data, f, indent=2)
-
-      print(json.dumps(replay_data, indent=2))
-
-  # 2. Create new task for replay
   - id: create-replay-task
     type: io.kestra.plugin.scripts.python.Script
-    description: "Create new task linked to original"
     outputFiles:
       - new_task.json
     script: |
       import json
-      import sys
       import subprocess
-      from datetime import datetime, timezone
+      import sys
 
-      CLI_PATH = "{{ globals.taskstate_cli_path | default('C:/Users/ryo-n/Codex_dev/agent-taskstate/docs/src/agent-taskstate_cli.py') }}"
-      DB_PATH = "{{ globals.taskstate_db | default('C:/Users/ryo-n/.agent-taskstate/agent-taskstate.db') }}"
+      CLI_PATH = "{{ globals.taskstate_cli_path | default('./agent-taskstate_cli.py') }}"
+      DB_PATH = "{{ globals.taskstate_db | default('./state/agent-taskstate.db') }}"
 
-      with open("{{ outputs.get-original-task.outputFiles['replay_data.json'] }}") as f:
+      with open("{{ outputs.get-original-task.outputFiles['replay_data.json'] }}", encoding="utf-8") as f:
           replay_data = json.load(f)
 
-      now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+      def run_cli(args):
+          cmd = [sys.executable, CLI_PATH, "--db", DB_PATH] + args
+          return subprocess.run(cmd, capture_output=True, text=True)
 
-      # Create new task with Phase 2 fields
-      payload = {
-          "kind": "feature",
-          "title": f"Replay of {replay_data['original_task_id']}",
-          "goal": "Manual replay execution",
-          "status": "ready",
-          "trace_id": replay_data["trace_id"],
-          "note_id": replay_data["note_id"],
-          "idempotency_key": replay_data["idempotency_key"],
-          "retry_count": replay_data["retry_count"],
-          "original_task_id": replay_data["original_task_id"],
-          "reply_target": replay_data["reply_target"],
-          "reply_state": "pending",
-          "reply_text": replay_data.get("reply_text", ""),
-          "roadmap_request_json": replay_data.get("roadmap_request"),
-          "trigger": "manual_replay"
-      }
+      if replay_data["duplicate_suppressed"]:
+          show_cmd = [sys.executable, CLI_PATH, "--db", DB_PATH, "task", "show", "--task", replay_data["original_task_id"]]
+          show_result = subprocess.run(show_cmd, capture_output=True, text=True)
+          current = json.loads(show_result.stdout).get("data", {}) if show_result.returncode == 0 else {}
+          count = current.get("duplicate_suppression_count", 0) + 1
+          fields = {
+              "duplicate_suppression_count": count,
+              "last_duplicate_scope": "replay",
+              "last_duplicate_key": replay_data["replay_dedupe_key"]
+          }
+          run_cli(["task", "update", "--task", replay_data["original_task_id"], "--json", json.dumps(fields, ensure_ascii=False)])
+          output = {
+              "new_task_id": replay_data["original_task_id"],
+              "original_task_id": replay_data["original_task_id"],
+              "retry_count": replay_data["retry_count"],
+              "duplicate_suppressed": True,
+              "execution_status": "suppressed"
+          }
+      else:
+          payload = {
+              "kind": "feature",
+              "title": f"Replay of {replay_data['original_task_id']}",
+              "goal": "Manual replay execution",
+              "status": "ready",
+              "trace_id": replay_data["trace_id"],
+              "note_id": replay_data["note_id"],
+              "idempotency_key": replay_data["idempotency_key"],
+              "retry_count": replay_data["retry_count"],
+              "original_task_id": replay_data["original_task_id"],
+              "reply_target": replay_data["reply_target"],
+              "reply_state": "pending",
+              "reply_text": replay_data.get("reply_text", ""),
+              "roadmap_request_json": replay_data.get("roadmap_request_json", ""),
+              "replay_dedupe_key": replay_data["replay_dedupe_key"],
+              "reply_dedupe_key": replay_data["reply_dedupe_key"],
+              "trigger": "manual_replay"
+          }
+          result = run_cli(["task", "create", "--json", json.dumps(payload, ensure_ascii=False)])
+          if result.returncode != 0:
+              sys.exit(1)
+          new_task = json.loads(result.stdout)
+          new_task_id = new_task.get("data", {}).get("id")
+          run_cli(["task", "update", "--task", replay_data["original_task_id"], "--json", json.dumps({"last_replay_dedupe_key": replay_data["replay_dedupe_key"]}, ensure_ascii=False)])
+          output = {
+              "new_task_id": new_task_id,
+              "original_task_id": replay_data["original_task_id"],
+              "retry_count": replay_data["retry_count"],
+              "duplicate_suppressed": False,
+              "execution_status": "created"
+          }
 
-      cmd = [sys.executable, CLI_PATH, "--db", DB_PATH, "task", "create",
-             "--json", json.dumps(payload)]
+      with open("{{ outputDir }}/new_task.json", "w", encoding="utf-8") as f:
+          json.dump(output, f, ensure_ascii=False, indent=2)
 
-      result = subprocess.run(cmd, capture_output=True, text=True)
-
-      if result.returncode != 0:
-          print(json.dumps({"ok": False, "error": result.stderr}))
-          sys.exit(1)
-
-      new_task = json.loads(result.stdout)
-      new_task_id = new_task.get("data", {}).get("id")
-
-      output = {
-          "new_task_id": new_task_id,
-          "original_task_id": replay_data["original_task_id"],
-          "retry_count": replay_data["retry_count"]
-      }
-
-      with open("{{ outputDir }}/new_task.json", "w") as f:
-          json.dump(output, f, indent=2)
-
-      print(json.dumps(output, indent=2))
-
-  # 2b. Transform roadmap_request to worker request format
   - id: transform-request
     type: io.kestra.plugin.scripts.python.Script
-    description: "Build worker request from roadmap_request"
     disabled: "{{ inputs.replay_type == 'notifier_only' }}"
     outputFiles:
       - worker_request.json
     script: |
       import json
-      from datetime import datetime, timezone
 
-      with open("{{ outputs.get-original-task.outputFiles['replay_data.json'] }}") as f:
+      with open("{{ outputs.get-original-task.outputFiles['replay_data.json'] }}", encoding="utf-8") as f:
           replay_data = json.load(f)
 
-      roadmap_request = replay_data.get("roadmap_request")
-
-      if not roadmap_request:
-          # No roadmap_request, create minimal placeholder
-          worker_request = {
-              "schema_version": "1.0.0",
-              "mode": "roadmap",
-              "problem_statement": {
-                  "problem_id": "pb_replay_001",
-                  "title": "Manual Replay",
-                  "statement": "Re-executing previous request"
-              },
-              "insights": [{
-                  "insight_id": "in_replay_001",
-                  "statement": "This is a replay execution"
-              }],
-              "constraints": [{
-                  "constraint_id": "co_replay_001",
-                  "category": "other",
-                  "statement": "Replay mode",
-                  "severity": "soft"
-              }],
-              "available_assets": [{
-                  "asset_id": "as_replay_001",
-                  "type": "skill",
-                  "name": "replay",
-                  "description": "Replay capability"
-              }]
-          }
+      if replay_data.get("duplicate_suppressed"):
+          worker_request = {"duplicate_suppressed": True}
       else:
-          # Use the stored roadmap_request directly
-          worker_request = roadmap_request
+          roadmap_request = replay_data.get("roadmap_request")
+          if not roadmap_request:
+              worker_request = {
+                  "schema_version": "1.0.0",
+                  "mode": "roadmap",
+                  "problem_statement": {"problem_id": "pb_replay_001", "title": "Manual Replay", "statement": "Re-executing previous request"},
+                  "insights": [{"insight_id": "in_replay_001", "statement": "This is a replay execution"}],
+                  "constraints": [{"constraint_id": "co_replay_001", "category": "other", "statement": "Replay mode", "severity": "soft"}],
+                  "available_assets": [{"asset_id": "as_replay_001", "type": "skill", "name": "replay", "description": "Replay capability"}]
+              }
+          else:
+              worker_request = roadmap_request
 
-      with open("{{ outputDir }}/worker_request.json", "w") as f:
-          json.dump(worker_request, f, indent=2)
+      with open("{{ outputDir }}/worker_request.json", "w", encoding="utf-8") as f:
+          json.dump(worker_request, f, ensure_ascii=False, indent=2)
 
-      print(f"Worker request prepared for replay task {replay_data.get('original_task_id')}")
-
-  # 3a. Branch: Full or Worker-only replay
   - id: run-worker-if-needed
     type: io.kestra.plugin.scripts.python.Script
-    description: "Run worker if replay_type is full or worker_only"
     disabled: "{{ inputs.replay_type == 'notifier_only' }}"
     outputFiles:
       - worker_response.json
     beforeCommands:
-      - cd {{ globals.roadmap_design_skill_path | default('C:/Users/ryo-n/Codex_dev/Roadmap-Design-Skill') }}
+      - cd {{ globals.roadmap_design_skill_path | default('./Roadmap-Design-Skill') }}
     script: |
       import json
       import subprocess
       import sys
 
-      # Run the Roadmap Design Skill worker
-      cmd = [
-          sys.executable, "-m", "wrappers.cli.main", "run", "--no-llm",
-          "-i", "{{ outputs.transform-request.outputFiles['worker_request.json'] }}",
-          "-o", "{{ outputDir }}/worker_response.json"
-      ]
+      with open("{{ outputs.create-replay-task.outputFiles['new_task.json'] }}", encoding="utf-8") as f:
+          new_task = json.load(f)
 
+      if new_task.get("duplicate_suppressed"):
+          response = {
+              "schema_version": "1.0.0",
+              "run": {"run_id": "replay-suppressed", "status": "skipped"},
+              "duplicate_suppressed": True
+          }
+          with open("{{ outputDir }}/worker_response.json", "w", encoding="utf-8") as f:
+              json.dump(response, f, ensure_ascii=False, indent=2)
+          sys.exit(0)
+
+      cmd = [sys.executable, "-m", "wrappers.cli.main", "run", "--no-llm", "-i", "{{ outputs.transform-request.outputFiles['worker_request.json'] }}", "-o", "{{ outputDir }}/worker_response.json"]
       result = subprocess.run(cmd, capture_output=True, text=True)
-
       if result.returncode != 0:
-          # Worker failed - create error response
           error_response = {
               "schema_version": "1.0.0",
-              "run": {
-                  "run_id": "replay-error",
-                  "mode": "roadmap",
-                  "status": "failed",
-                  "created_at": "",
-                  "updated_at": "",
-                  "planner_version": "1.0.0",
-                  "response_language": "ja"
-              },
+              "run": {"run_id": "replay-error", "mode": "roadmap", "status": "failed"},
               "error": result.stderr or result.stdout
           }
-          with open("{{ outputDir }}/worker_response.json", "w") as f:
-              json.dump(error_response, f, indent=2)
-          print(f"Worker failed: {result.stderr}")
-      else:
-          print("Worker completed successfully")
+          with open("{{ outputDir }}/worker_response.json", "w", encoding="utf-8") as f:
+              json.dump(error_response, f, ensure_ascii=False, indent=2)
 
-  # 3b. Branch: Extract reply (if worker ran)
   - id: extract-reply-if-needed
     type: io.kestra.plugin.scripts.python.Script
     disabled: "{{ inputs.replay_type == 'notifier_only' }}"
@@ -298,52 +262,79 @@ tasks:
     script: |
       import json
 
-      with open("{{ outputs.run-worker-if-needed.outputFiles['worker_response.json'] }}") as f:
-          response = json.load(f)
-
-      run_status = response.get("run", {}).get("status", "failed")
-
-      if run_status == "completed":
-          # Extract meaningful reply from roadmap response
-          phases = response.get("roadmap", [])
-          phase_count = len(phases)
-
-          if phase_count > 0:
-              # Summarize the roadmap
-              phase_titles = [p.get("title", "Unnamed") for p in phases[:3]]
-              summary = "、".join(phase_titles)
-              if phase_count > 3:
-                  summary += f" 他{phase_count - 3}フェーズ"
-              reply_text = f"再実行完了。ロードマップ: {summary}"
-          else:
-              reply_text = "再実行が完了しました。"
-      elif run_status == "partial":
-          reply_text = "再実行が部分的に完了しました。詳細を確認してください。"
+      with open("{{ outputs.create-replay-task.outputFiles['new_task.json'] }}", encoding="utf-8") as f:
+          new_task = json.load(f)
+      if new_task.get("duplicate_suppressed"):
+          reply_text = "同一 replay リクエストを抑止しました。"
       else:
-          error_msg = response.get("error", "不明なエラー")
-          reply_text = f"再実行中にエラーが発生しました: {error_msg}"
+          with open("{{ outputs.run-worker-if-needed.outputFiles['worker_response.json'] }}", encoding="utf-8") as f:
+              response = json.load(f)
+          run_status = response.get("run", {}).get("status", "failed")
+          if run_status == "completed":
+              phases = response.get("roadmap", [])
+              phase_count = len(phases)
+              if phase_count > 0:
+                  phase_titles = [p.get("title", "Unnamed") for p in phases[:3]]
+                  summary = "、".join(phase_titles)
+                  if phase_count > 3:
+                      summary += f" 他{phase_count - 3}フェーズ"
+                  reply_text = f"再実行完了。ロードマップ: {summary}"
+              else:
+                  reply_text = "再実行が完了しました。"
+          elif run_status == "partial":
+              reply_text = "再実行が部分的に完了しました。詳細を確認してください。"
+          else:
+              error_msg = response.get("error", "不明なエラー")
+              reply_text = f"再実行中にエラーが発生しました: {error_msg}"
 
       with open("{{ outputDir }}/reply_text.txt", "w", encoding="utf-8") as f:
           f.write(reply_text)
 
-      print(f"Reply text: {reply_text}")
-
-  # 4. Post reply to Misskey
   - id: post-reply
-    type: io.kestra.plugin.scripts.http.Request
-    uri: "{{ globals.misskey_api_url | default('http://misskey:3000/api') }}/notes/create"
-    method: POST
-    headers:
-      Content-Type: application/json
-    body: |
-      {
-        "i": "{{ secret('MISSKEY_API_TOKEN') }}",
-        "replyId": "{{ outputs.get-original-task.outputFiles['replay_data.json'] | json(data='reply_target') }}",
-        "text": "{{ inputs.replay_type == 'notifier_only' ? outputs.get-original-task.outputFiles['replay_data.json'] | json(data='reply_text') : outputs.extract-reply-if-needed.outputFiles['reply_text.txt'] }}",
-        "visibility": "home"
-      }
+    type: io.kestra.plugin.scripts.python.Script
+    outputFiles:
+      - post_reply_result.json
+    script: |
+      import json
+      import urllib.request
+      import urllib.error
 
-  # 5. Update new task to done (following valid state transitions)
+      with open("{{ outputs.create-replay-task.outputFiles['new_task.json'] }}", encoding="utf-8") as f:
+          new_task = json.load(f)
+      with open("{{ outputs.get-original-task.outputFiles['replay_data.json'] }}", encoding="utf-8") as f:
+          replay_data = json.load(f)
+
+      if new_task.get("duplicate_suppressed"):
+          result = {"status": "suppressed", "duplicate_suppressed": True}
+      else:
+          if "{{ inputs.replay_type }}" == "notifier_only":
+              reply_text = replay_data.get("reply_text", "")
+          else:
+              with open("{{ outputs.extract-reply-if-needed.outputFiles['reply_text.txt'] }}", "r", encoding="utf-8") as f:
+                  reply_text = f.read()
+
+          payload = {
+              "i": "{{ secret('MISSKEY_API_TOKEN') }}",
+              "replyId": replay_data.get("reply_target", ""),
+              "text": reply_text,
+              "visibility": "home"
+          }
+          request = urllib.request.Request(
+              "{{ globals.misskey_api_url | default('http://misskey:3000/api') }}/notes/create",
+              data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+              headers={"Content-Type": "application/json"},
+              method="POST"
+          )
+          try:
+              with urllib.request.urlopen(request, timeout=30):
+                  result = {"status": "sent", "duplicate_suppressed": False, "reply_text": reply_text}
+          except urllib.error.HTTPError as exc:
+              result = {"status": "failed", "duplicate_suppressed": False, "error": str(exc), "reply_text": reply_text}
+              raise
+
+      with open("{{ outputDir }}/post_reply_result.json", "w", encoding="utf-8") as f:
+          json.dump(result, f, ensure_ascii=False, indent=2)
+
   - id: finalize-task
     type: io.kestra.plugin.scripts.python.Script
     outputFiles:
@@ -353,11 +344,21 @@ tasks:
       import subprocess
       import sys
 
-      CLI_PATH = "{{ globals.taskstate_cli_path | default('C:/Users/ryo-n/Codex_dev/agent-taskstate/docs/src/agent-taskstate_cli.py') }}"
-      DB_PATH = "{{ globals.taskstate_db | default('C:/Users/ryo-n/.agent-taskstate/agent-taskstate.db') }}"
+      CLI_PATH = "{{ globals.taskstate_cli_path | default('./agent-taskstate_cli.py') }}"
+      DB_PATH = "{{ globals.taskstate_db | default('./state/agent-taskstate.db') }}"
 
-      with open("{{ outputs.create-replay-task.outputFiles['new_task.json'] }}") as f:
+      with open("{{ outputs.create-replay-task.outputFiles['new_task.json'] }}", encoding="utf-8") as f:
           new_task = json.load(f)
+      with open("{{ outputs.get-original-task.outputFiles['replay_data.json'] }}", encoding="utf-8") as f:
+          replay_data = json.load(f)
+      with open("{{ outputs.post-reply.outputFiles['post_reply_result.json'] }}", encoding="utf-8") as f:
+          post_result = json.load(f)
+
+      if new_task.get("duplicate_suppressed"):
+          result = {"success": True, "task_id": replay_data["original_task_id"], "duplicate_suppressed": True}
+          with open("{{ outputDir }}/finalize_result.json", "w", encoding="utf-8") as f:
+              json.dump(result, f, ensure_ascii=False, indent=2)
+          sys.exit(0)
 
       new_task_id = new_task["new_task_id"]
 
@@ -365,17 +366,7 @@ tasks:
           cmd = [sys.executable, CLI_PATH, "--db", DB_PATH] + args
           return subprocess.run(cmd, capture_output=True, text=True)
 
-      # Task was created with status=ready
-      # Must transition: ready -> review -> done
-
-      # Step 1: Transition to review
-      result = run_cli(["task", "set-status", "--task", new_task_id, "--to", "review",
-                        "--reason", "Replay processing completed"])
-      if result.returncode != 0:
-          print(f"Failed to transition to review: {result.stderr}")
-          sys.exit(1)
-
-      # Step 2: Set current_summary before done transition (required by agent-taskstate)
+      run_cli(["task", "set-status", "--task", new_task_id, "--to", "review", "--reason", "Replay processing completed"])
       state_payload = {
           "current_step": "completed",
           "current_summary": "Replay completed successfully",
@@ -384,43 +375,28 @@ tasks:
           "artifact_refs": [],
           "evidence_refs": []
       }
-      run_cli(["state", "put", "--task", new_task_id, "--json", json.dumps(state_payload)])
+      run_cli(["state", "put", "--task", new_task_id, "--json", json.dumps(state_payload, ensure_ascii=False)])
+      run_cli(["task", "set-status", "--task", new_task_id, "--to", "done", "--reason", "Replay completed"])
+      fields = {
+          "reply_state": "sent" if post_result.get("status") == "sent" else "failed",
+          "reply_text": post_result.get("reply_text", replay_data.get("reply_text", "")),
+          "last_reply_dedupe_key": replay_data["reply_dedupe_key"]
+      }
+      run_cli(["task", "update", "--task", new_task_id, "--json", json.dumps(fields, ensure_ascii=False)])
 
-      # Step 3: Transition to done
-      result = run_cli(["task", "set-status", "--task", new_task_id, "--to", "done",
-                        "--reason", "Replay completed"])
-      if result.returncode != 0:
-          print(f"Failed to transition to done: {result.stderr}")
-          sys.exit(1)
+      result = {"success": True, "task_id": new_task_id, "duplicate_suppressed": False}
+      with open("{{ outputDir }}/finalize_result.json", "w", encoding="utf-8") as f:
+          json.dump(result, f, ensure_ascii=False, indent=2)
 
-      reply_text = None
-      if "{{ inputs.replay_type }}" == "notifier_only":
-          with open("{{ outputs.get-original-task.outputFiles['replay_data.json'] }}") as f:
-              reply_text = json.load(f).get("reply_text", "")
-      else:
-          with open("{{ outputs.extract-reply-if-needed.outputFiles['reply_text.txt'] }}", "r", encoding="utf-8") as f:
-              reply_text = f.read()
-
-      # Update reply_state to sent and persist reply_text
-      run_cli(["task", "update", "--task", new_task_id, "--json",
-               json.dumps({"reply_state": "sent", "reply_text": reply_text}, ensure_ascii=False)])
-
-      result = {"success": True, "task_id": new_task_id}
-      with open("{{ outputDir }}/finalize_result.json", "w") as f:
-          json.dump(result, f)
-
-      print(f"Replay task {new_task_id} finalized")
-
-  # 6. Log completion
   - id: log-completion
     type: io.kestra.plugin.core.log.Log
     message: |
-      Manual replay completed:
-      - Resolved task: {{ outputs.resolve-task-id.outputFiles['resolved_task_id.txt'] }}
-      - New task: {{ outputs.create-replay-task.outputFiles['new_task.json'] | json(data='new_task_id') }}
-      - Replay type: {{ inputs.replay_type }}
+      Manual replay completed.
+      resolved_task={{ outputs.resolve-task-id.outputFiles['resolved_task_id.txt'] }}
+      new_task={{ outputs.create-replay-task.outputFiles['new_task.json'] }}
+      replay_type={{ inputs.replay_type }}
+      finalize={{ outputs.finalize-task.outputFiles['finalize_result.json'] }}
 
-# Error handling
 errors:
   - id: error-handler
     type: io.kestra.plugin.core.execution.Fail

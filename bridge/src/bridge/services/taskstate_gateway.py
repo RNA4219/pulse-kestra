@@ -45,6 +45,21 @@ class TaskstateGateway:
         self.settings = settings
         self._cli_command = settings.taskstate_cli_command
 
+    @staticmethod
+    def build_note_dedupe_key(note_id: str) -> str:
+        """Build idempotency key for Misskey mention dedupe."""
+        return f"misskey:{note_id}"
+
+    @staticmethod
+    def build_reply_dedupe_key(task_id: str, reply_target: str) -> str:
+        """Build dedupe key for reply sending."""
+        return f"reply:{task_id}:{reply_target}"
+
+    @staticmethod
+    def build_replay_dedupe_key(original_task_id: str, replay_type: str, bucket: str) -> str:
+        """Build dedupe key for manual replay."""
+        return f"replay:{original_task_id}:{replay_type}:{bucket}"
+
     def _run_cli(self, args: list[str]) -> TaskstateResult:
         """Run taskstate CLI with given arguments.
 
@@ -253,7 +268,7 @@ class TaskstateGateway:
             "priority": "medium",
             "owner_type": "agent",
             "owner_id": "pulse-bridge",
-            "idempotency_key": f"misskey:{note_id}",
+            "idempotency_key": self.build_note_dedupe_key(note_id),
             "note_id": note_id,
             "trace_id": trace_id,
             "reply_target": reply_target or note_id,
@@ -351,3 +366,24 @@ class TaskstateGateway:
             task_id=task_id,
             fields={"kestra_execution_id": execution_id},
         )
+
+    def record_duplicate_suppression(
+        self,
+        *,
+        task_id: str,
+        dedupe_scope: str,
+        dedupe_key: str,
+    ) -> TaskstateResult:
+        """Record duplicate suppression metadata on a task."""
+        show_result = self._run_cli(["task", "show", "--task", task_id])
+        if not show_result.success:
+            return show_result
+
+        current = show_result.data or {}
+        count = current.get("duplicate_suppression_count", 0) + 1
+        fields = {
+            "duplicate_suppression_count": count,
+            "last_duplicate_scope": dedupe_scope,
+            "last_duplicate_key": dedupe_key,
+        }
+        return self.update_task(task_id=task_id, fields=fields)

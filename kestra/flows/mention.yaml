@@ -24,8 +24,8 @@ tasks:
       - run_id.txt
     commands:
       - |
-        CLI_PATH="{{ globals.taskstate_cli_path | default('C:/Users/ryo-n/Codex_dev/agent-taskstate/docs/src/agent-taskstate_cli.py') }}"
-        DB_PATH="{{ globals.taskstate_db | default('C:/Users/ryo-n/.agent-taskstate/agent-taskstate.db') }}"
+        CLI_PATH="{{ globals.taskstate_cli_path | default('./agent-taskstate_cli.py') }}"
+        DB_PATH="{{ globals.taskstate_db | default('./state/agent-taskstate.db') }}"
         TASK_ID="{{ trigger.body.task_id }}"
 
         # Transition task: ready -> in_progress
@@ -149,7 +149,7 @@ tasks:
     outputFiles:
       - worker_response.json
     beforeCommands:
-      - cd {{ globals.roadmap_design_skill_path | default('C:/Users/ryo-n/Codex_dev/Roadmap-Design-Skill') }}
+      - cd {{ globals.roadmap_design_skill_path | default('./Roadmap-Design-Skill') }}
     commands:
       - |
         python -m wrappers.cli.main run --no-llm \
@@ -248,8 +248,8 @@ tasks:
       import subprocess
       import sys
 
-      CLI_PATH = "{{ globals.taskstate_cli_path | default('C:/Users/ryo-n/Codex_dev/agent-taskstate/docs/src/agent-taskstate_cli.py') }}"
-      DB_PATH = "{{ globals.taskstate_db | default('C:/Users/ryo-n/.agent-taskstate/agent-taskstate.db') }}"
+      CLI_PATH = "{{ globals.taskstate_cli_path | default('./agent-taskstate_cli.py') }}"
+      DB_PATH = "{{ globals.taskstate_db | default('./state/agent-taskstate.db') }}"
       TASK_ID = "{{ trigger.body.task_id }}"
       RUN_ID = ""
 

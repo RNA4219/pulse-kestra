@@ -204,6 +204,7 @@ POST /api/v1/main/executions/webhook/pulse/manual-replay/<key>
 
 ### スケジュール
 - 5分間隔で自動実行
+- heartbeat は重い worker を直接実行せず、manual-replay / notifier-resend の起動に限定する
 
 ### 処理内容
 1. **stuck task 検出**: `in_progress` かつ 15分以上更新なし
@@ -264,3 +265,14 @@ POST /api/v1/main/executions/webhook/pulse/manual-replay/<key>
 3. **一時対処**: manual-replay または task の status 変更
 4. **根本対処**: 原因調査と修正
 5. **事後検証**: 再発防止策の実施
+
+## 9. 観測点
+
+最低限追う項目は次です。
+
+- replay 実行件数
+- 未通知再送件数
+- notification failure 件数
+- duplicate suppression 件数
+
+集計元は taskstate の `retry_count`, `reply_state`, `duplicate_suppression_count` と heartbeat / manual-replay / notifier-resend の outputFiles です。

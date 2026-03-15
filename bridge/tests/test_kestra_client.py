@@ -19,6 +19,8 @@ class TestKestraClient:
             kestra_namespace="pulse",
             kestra_flow_id="mention",
             kestra_webhook_key="test-key",
+            kestra_basic_user="",
+            kestra_basic_pass="",
         )
 
     @pytest.fixture

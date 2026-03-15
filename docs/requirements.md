@@ -322,4 +322,14 @@ Phase 2 では次を追加の完了条件とする。
 4. heartbeat は軽く保つ
 5. 重い推論は外に逃がす
 6. flow は増やしても本体は太らせない
-7. plugin は最後に検討する
+7. 通常運転の正規経路は `research -> insight -> gate -> sync -> notify` とする
+8. plugin は最後に検討する
+
+
+## 12. Phase 2 運用契約
+
+- heartbeat は stuck task 検出、pending / failed reply 検出、retry candidate 検出に限定し、重い worker を直接持たない。
+- manual replay は `task_id` または `trace_id` から再開できる。
+- notifier resend は保存済み `reply_text` を再利用する。
+- durable dedupe の正本キーは `misskey:{note_id}`、`reply:{task_id}:{reply_target}`、`replay:{original_task_id}:{replay_type}:{bucket}` とする。
+- duplicate suppression、replay、resend、notification failure は後から集計できる field / log を持つ。

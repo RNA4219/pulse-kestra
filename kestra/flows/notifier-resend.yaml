@@ -1,117 +1,150 @@
 # Kestra Flow: Notifier Resend
-# Resend Misskey reply for a specific task (without re-running worker)
+# Resend Misskey reply for a specific task without re-running the worker.
 
 id: notifier-resend
 namespace: pulse
 
-# Prevent concurrent executions for same task
+description: >-
+  Reuse stored reply_text and reply_target. Suppress duplicate resend requests,
+  update reply_state, and preserve retry metadata in taskstate.
+
 concurrency:
   behavior: CANCEL
   limit: 1
   key: "{{ trigger.body.task_id }}"
 
 tasks:
-  # 1. Validate and get task data
   - id: get-task-data
     type: io.kestra.plugin.scripts.python.Script
-    description: "Retrieve task data and validate resend is possible"
     outputFiles:
       - task_data.json
     script: |
       import json
-      import sys
       import subprocess
+      import sys
+      from datetime import datetime, timezone
 
-      CLI_PATH = "{{ globals.taskstate_cli_path | default('C:/Users/ryo-n/Codex_dev/agent-taskstate/docs/src/agent-taskstate_cli.py') }}"
-      DB_PATH = "{{ globals.taskstate_db | default('C:/Users/ryo-n/.agent-taskstate/agent-taskstate.db') }}"
+      CLI_PATH = "{{ globals.taskstate_cli_path | default('./agent-taskstate_cli.py') }}"
+      DB_PATH = "{{ globals.taskstate_db | default('./state/agent-taskstate.db') }}"
       TASK_ID = "{{ trigger.body.task_id }}"
 
-      # Get task data
       cmd = [sys.executable, CLI_PATH, "--db", DB_PATH, "task", "show", "--task", TASK_ID]
       result = subprocess.run(cmd, capture_output=True, text=True)
-
       if result.returncode != 0:
-          print(json.dumps({"ok": False, "error": "Task not found"}))
           sys.exit(1)
 
       task_data = json.loads(result.stdout)
-
-      if not task_data.get("ok"):
-          print(json.dumps({"ok": False, "error": task_data.get("error", "Unknown error")}))
-          sys.exit(1)
-
       task = task_data.get("data", {})
-      reply_state = task.get("reply_state", "")
-
-      # Check if resend is allowed
-      if reply_state == "sent":
-          print(json.dumps({"ok": False, "error": "Reply already sent"}))
-          sys.exit(1)
-
-      # Get reply text from task or use default
-      reply_text = task.get("reply_text", "処理が完了しました。詳細は別途ご確認ください。")
-
+      reply_target = task.get("reply_target", task.get("note_id", ""))
+      reply_dedupe_key = f"reply:{TASK_ID}:{reply_target}"
+      duplicate_suppressed = task.get("reply_state") == "sent"
       output = {
           "ok": True,
           "task_id": TASK_ID,
           "trace_id": task.get("trace_id", ""),
           "note_id": task.get("note_id", ""),
-          "reply_target": task.get("reply_target", task.get("note_id", "")),
-          "reply_text": reply_text,
-          "reply_state": reply_state,
+          "reply_target": reply_target,
+          "reply_text": task.get("reply_text", "処理が完了しました。詳細は別途ご確認ください。"),
+          "reply_state": task.get("reply_state", "pending"),
           "retry_count": task.get("retry_count", 0),
+          "reply_dedupe_key": reply_dedupe_key,
+          "duplicate_suppressed": duplicate_suppressed,
+          "request_bucket": datetime.now(timezone.utc).strftime("%Y%m%d%H%M")
       }
 
-      with open("{{ outputDir }}/task_data.json", "w") as f:
-          json.dump(output, f, indent=2)
+      with open("{{ outputDir }}/task_data.json", "w", encoding="utf-8") as f:
+          json.dump(output, f, ensure_ascii=False, indent=2)
 
-      print(json.dumps(output, indent=2))
-
-  # 2. Post reply to Misskey
   - id: post-reply
-    type: io.kestra.plugin.scripts.http.Request
-    uri: "{{ globals.misskey_api_url | default('http://misskey:3000/api') }}/notes/create"
-    method: POST
-    headers:
-      Content-Type: application/json
-    body: |
-      {
-        "i": "{{ secret('MISSKEY_API_TOKEN') }}",
-        "replyId": "{{ outputs.get-task-data.outputFiles['task_data.json'] | json(data='reply_target') }}",
-        "text": "{{ outputs.get-task-data.outputFiles['task_data.json'] | json(data='reply_text') }}",
-        "visibility": "home"
-      }
+    type: io.kestra.plugin.scripts.python.Script
+    outputFiles:
+      - resend_result.json
+    script: |
+      import json
+      import urllib.request
+      import urllib.error
 
-  # 3. Update taskstate
+      with open("{{ outputs.get-task-data.outputFiles['task_data.json'] }}", encoding="utf-8") as f:
+          task_data = json.load(f)
+
+      if task_data.get("duplicate_suppressed"):
+          result = {"status": "suppressed", "duplicate_suppressed": True}
+      else:
+          payload = {
+              "i": "{{ secret('MISSKEY_API_TOKEN') }}",
+              "replyId": task_data.get("reply_target", ""),
+              "text": task_data.get("reply_text", ""),
+              "visibility": "home"
+          }
+          request = urllib.request.Request(
+              "{{ globals.misskey_api_url | default('http://misskey:3000/api') }}/notes/create",
+              data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+              headers={"Content-Type": "application/json"},
+              method="POST"
+          )
+          try:
+              with urllib.request.urlopen(request, timeout=30):
+                  result = {"status": "sent", "duplicate_suppressed": False}
+          except urllib.error.HTTPError as exc:
+              result = {"status": "failed", "duplicate_suppressed": False, "error": str(exc)}
+              raise
+
+      with open("{{ outputDir }}/resend_result.json", "w", encoding="utf-8") as f:
+          json.dump(result, f, ensure_ascii=False, indent=2)
+
   - id: update-taskstate
     type: io.kestra.plugin.scripts.python.Script
-    description: "Update reply_state and retry_count"
+    outputFiles:
+      - taskstate_update.json
     script: |
       import json
       import subprocess
       import sys
 
-      CLI_PATH = "{{ globals.taskstate_cli_path | default('C:/Users/ryo-n/Codex_dev/agent-taskstate/docs/src/agent-taskstate_cli.py') }}"
-      DB_PATH = "{{ globals.taskstate_db | default('C:/Users/ryo-n/.agent-taskstate/agent-taskstate.db') }}"
-      TASK_ID = "{{ trigger.body.task_id }}"
+      CLI_PATH = "{{ globals.taskstate_cli_path | default('./agent-taskstate_cli.py') }}"
+      DB_PATH = "{{ globals.taskstate_db | default('./state/agent-taskstate.db') }}"
 
-      # Update reply_state to sent
-      cmd = [sys.executable, CLI_PATH, "--db", DB_PATH, "task", "update",
-             "--task", TASK_ID,
-             "--json", json.dumps({"reply_state": "sent"})]
-      result = subprocess.run(cmd, capture_output=True, text=True)
+      with open("{{ outputs.get-task-data.outputFiles['task_data.json'] }}", encoding="utf-8") as f:
+          task_data = json.load(f)
+      with open("{{ outputs.post-reply.outputFiles['resend_result.json'] }}", encoding="utf-8") as f:
+          resend_result = json.load(f)
 
-      if result.returncode != 0:
-          print(json.dumps({"ok": False, "error": result.stderr}))
+      task_id = task_data["task_id"]
+      cmd = [sys.executable, CLI_PATH, "--db", DB_PATH, "task", "show", "--task", task_id]
+      show_result = subprocess.run(cmd, capture_output=True, text=True)
+      current = json.loads(show_result.stdout).get("data", {}) if show_result.returncode == 0 else {}
+
+      if resend_result.get("status") == "suppressed":
+          fields = {
+              "duplicate_suppression_count": current.get("duplicate_suppression_count", 0) + 1,
+              "last_duplicate_scope": "reply",
+              "last_duplicate_key": task_data["reply_dedupe_key"]
+          }
+      elif resend_result.get("status") == "sent":
+          fields = {
+              "reply_state": "sent",
+              "last_reply_dedupe_key": task_data["reply_dedupe_key"]
+          }
       else:
-          print(f"Reply sent successfully for task {TASK_ID}")
+          fields = {
+              "reply_state": "failed",
+              "retry_count": current.get("retry_count", 0) + 1
+          }
 
-  # 4. Log success
+      update_cmd = [sys.executable, CLI_PATH, "--db", DB_PATH, "task", "update", "--task", task_id, "--json", json.dumps(fields, ensure_ascii=False)]
+      subprocess.run(update_cmd, capture_output=True, text=True)
+
+      with open("{{ outputDir }}/taskstate_update.json", "w", encoding="utf-8") as f:
+          json.dump({"task_id": task_id, "fields": fields}, f, ensure_ascii=False, indent=2)
+
   - id: log-success
     type: io.kestra.plugin.core.log.Log
-    message: "Notifier resend completed for task {{ trigger.body.task_id }}"
+    message: |
+      Notifier resend completed.
+      task={{ trigger.body.task_id }}
+      resend={{ outputs.post-reply.outputFiles['resend_result.json'] }}
+      taskstate={{ outputs.update-taskstate.outputFiles['taskstate_update.json'] }}
 
-# Error handling
 errors:
   - id: error-handler
     type: io.kestra.plugin.scripts.python.Script
@@ -120,11 +153,10 @@ errors:
       import subprocess
       import sys
 
-      CLI_PATH = "{{ globals.taskstate_cli_path | default('C:/Users/ryo-n/Codex_dev/agent-taskstate/docs/src/agent-taskstate_cli.py') }}"
-      DB_PATH = "{{ globals.taskstate_db | default('C:/Users/ryo-n/.agent-taskstate/agent-taskstate.db') }}"
+      CLI_PATH = "{{ globals.taskstate_cli_path | default('./agent-taskstate_cli.py') }}"
+      DB_PATH = "{{ globals.taskstate_db | default('./state/agent-taskstate.db') }}"
       TASK_ID = "{{ trigger.body.task_id }}"
 
-      # Read current retry_count and increment on failure
       show_cmd = [sys.executable, CLI_PATH, "--db", DB_PATH, "task", "show", "--task", TASK_ID]
       show_result = subprocess.run(show_cmd, capture_output=True, text=True)
       retry_count = 0
@@ -134,16 +166,9 @@ errors:
           except Exception:
               retry_count = 0
 
-      cmd = [sys.executable, CLI_PATH, "--db", DB_PATH, "task", "update",
-             "--task", TASK_ID,
-             "--json", json.dumps({"reply_state": "failed", "retry_count": retry_count + 1})]
-      subprocess.run(cmd, capture_output=True)
-
-      print(json.dumps({
-          "ok": False,
-          "error": "Notifier resend failed",
-          "task_id": TASK_ID
-      }))
+      update_cmd = [sys.executable, CLI_PATH, "--db", DB_PATH, "task", "update", "--task", TASK_ID, "--json", json.dumps({"reply_state": "failed", "retry_count": retry_count + 1}, ensure_ascii=False)]
+      subprocess.run(update_cmd, capture_output=True)
+      print(json.dumps({"ok": False, "error": "Notifier resend failed", "task_id": TASK_ID}, ensure_ascii=False))
 
 triggers:
   - id: webhook-trigger

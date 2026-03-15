@@ -168,6 +168,11 @@ class TestHeartbeatFlowConfiguration:
         """Verify that webhook uses PULSE_KESTRA_WEBHOOK_KEY secret."""
         assert "PULSE_KESTRA_WEBHOOK_KEY" in flow_content
 
+    def test_heartbeat_uses_public_default_paths(self, flow_content):
+        assert "./agent-taskstate_cli.py" in flow_content
+        assert "./state/agent-taskstate.db" in flow_content
+        assert "C:/Users/ryo-n" not in flow_content
+
     def test_heartbeat_uses_reply_state_filter_and_notifier_resend_webhook(self, flow_content):
         assert '--reply-state", reply_state' in flow_content or '--reply-state' in flow_content
         assert '/api/v1/main/executions/webhook/pulse/notifier-resend/' in flow_content
@@ -213,7 +218,14 @@ class TestManualReplayFlowConfiguration:
     def test_manual_replay_uses_stored_roadmap_request_and_reply_text(self, flow_content):
         assert 'roadmap_request_json' in flow_content
         assert 'reply_text' in flow_content
-        assert "outputs.get-original-task.outputFiles['replay_data.json'] | json(data='reply_text')" in flow_content
+        assert 'replay_dedupe_key' in flow_content
+        assert 'duplicate_suppressed' in flow_content
+
+    def test_manual_replay_uses_public_default_paths(self, flow_content):
+        assert "./agent-taskstate_cli.py" in flow_content
+        assert "./state/agent-taskstate.db" in flow_content
+        assert "./Roadmap-Design-Skill" in flow_content
+        assert "C:/Users/ryo-n" not in flow_content
 
 
 class TestTaskIOValidation:
@@ -242,3 +254,22 @@ class TestTaskIOValidation:
         assert "outputs.get-original-task.outputFiles['replay_data.json']" in manual_replay_flow
         # new_task.json from create-replay-task is used in finalize-task
         assert "outputs.create-replay-task.outputFiles['new_task.json']" in manual_replay_flow
+
+
+NOTIFIER_RESEND_FLOW_PATH = Path(__file__).parent.parent.parent / "kestra" / "flows" / "notifier-resend.yaml"
+
+
+class TestNotifierResendFlowConfiguration:
+    @pytest.fixture
+    def flow_content(self):
+        return NOTIFIER_RESEND_FLOW_PATH.read_text(encoding="utf-8")
+
+    def test_notifier_resend_reuses_reply_text(self, flow_content):
+        assert "reply_text" in flow_content
+        assert "reply_dedupe_key" in flow_content
+        assert "duplicate_suppressed" in flow_content
+
+    def test_notifier_resend_uses_public_default_paths(self, flow_content):
+        assert "./agent-taskstate_cli.py" in flow_content
+        assert "./state/agent-taskstate.db" in flow_content
+        assert "C:/Users/ryo-n" not in flow_content
