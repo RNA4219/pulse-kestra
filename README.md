@@ -14,6 +14,7 @@ Phase 1 の bridge 実装に加えて、heartbeat / manual replay / notifier res
 ## ドキュメント入口
 
 - [要件定義](./docs/requirements.md)
+- [仕様書](./docs/specification.md)
 - [アーキテクチャ方針](./docs/architecture.md)
 - [主要フロー](./docs/flows.md)
 - [イベントとインターフェースの schema](./docs/event-schema.md)
